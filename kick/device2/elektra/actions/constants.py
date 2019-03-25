@@ -1,0 +1,2 @@
+class ElektraConstants:
+    pass
