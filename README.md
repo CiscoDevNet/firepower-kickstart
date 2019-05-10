@@ -1,3 +1,3 @@
 # Firepower-Kick
 
-Python modules that can be used to install FTD on hardware platforms. 
+Python modules to install FTD images on hardware platforms. 
