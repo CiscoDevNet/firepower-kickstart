@@ -8,7 +8,7 @@ setuptools.setup(
       version='0.1.0',
       author="Cisco Systems Inc.",
       author_email="firepower-kickstart-support-ext@cisco.com",
-      description="Python modules to install FTD images on hardware platforms.",
+      description="Python modules to install Firepower Threat Defense images (FTD) on hardware platforms.",
       long_description=long_description,
       long_description_content_type="text/markdown",
       url="https://github.com/CiscoDevNet/firepower-kickstart",
