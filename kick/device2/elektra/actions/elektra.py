@@ -269,7 +269,7 @@ class ElektraLine(BasicLine):
 
         logger.info('=== Check module sfr status')
         # if sfr status is 'Up', the module recover command has to be reissued
-        output = self.execute("show module sfr details | grep ^Status")
+        output = self.execute("show module sfr details | grep ^Status", timeout=120)
         if any(state in output for state in ["Init", "Up"]):
             self.execute_and_verify(cmd='show module sfr details | grep ^Status',
                                     expected_str='    Up',
@@ -288,7 +288,7 @@ class ElektraLine(BasicLine):
                                 retry_count=50)
         self.execute_and_verify(cmd='show module sfr details | grep ^Console session:',
                                 expected_str='    Ready',
-                                timeout=60,
+                                timeout=120,
                                 interval=10,
                                 timeout_total=360,
                                 retry_count=50)
@@ -449,7 +449,6 @@ class ElektraLine(BasicLine):
              'sendline(YES)', None, False, False],
         ])
         d1.process(self.spawn_id, timeout=600)
-
         d2 = Dialog([
             ['Enter new password:',
              'sendline({})'.format(self.sm.patterns.login_password),
@@ -457,24 +456,36 @@ class ElektraLine(BasicLine):
             ['Confirm new password:',
              'sendline({})'.format(self.sm.patterns.login_password),
              None, True, False],
-            ['Do you want to configure IPv4', 'sendline(y)', None, True, False],
-            ['Do you want to configure IPv6', 'sendline(n)', None, True, False],
-            ['Configure IPv4 via DHCP or manually', 'sendline(manual)', None,
-             True, False],
-            ['Enter an IPv4 address for the management interface',
-             'sendline({})'.format(self.uut_ip), None, True, False],
-            ['Enter an IPv4 netmask for the management interface',
-             'sendline({})'.format(self.uut_netmask), None, True, False],
-            ['Enter the IPv4 default gateway for the management interface',
-             'sendline({})'.format(self.uut_gateway), None, True, False],
-            ['Enter a fully qualified hostname for this system ',
-             'sendline({})'.format(self.hostname), None, True, False],
-            ['Enter a comma-separated list of DNS servers or',
-             'sendline({})'.format(self.dns_server), None, True, False],
-            ['Enter a comma-separated list of search domains or',
-             'sendline({})'.format(self.search_domains), None, True, False],
-            ['> ', 'sendline()', None, False, False],
-        ])
+            ['Do you want to configure IPv4', 'sendline(y)', None, True, False]
+            ])
+        if self.uut_ip6 is None:
+            d2.append(['Do you want to configure IPv6', 'sendline(n)', None, True, False])
+        else:
+            d2.append(['Do you want to configure IPv6', 'sendline(y)', None, True, False])
+        d2.append(['Configure IPv4 via DHCP or manually', 'sendline(manual)', None,
+                    True, False])
+        d2.append(['Enter an IPv4 address for the management interface',
+                    'sendline({})'.format(self.uut_ip), None, True, False])
+        d2.append(['Enter an IPv4 netmask for the management interface',
+                    'sendline({})'.format(self.uut_netmask), None, True, False])
+        d2.append(['Enter the IPv4 default gateway for the management interface',
+                    'sendline({})'.format(self.uut_gateway), None, True, False])
+        if self.uut_ip6 is not None:
+            d2.append(['Configure IPv6 via DHCP, router, or manually',
+                       'sendline(manual)', None, True, False])
+            d2.append(['Enter the IPv6 address for the management interface',
+                       'sendline({})'.format(self.uut_ip6), None, True, False])
+            d2.append(['Enter the IPv6 address prefix for the management interface',
+                       'sendline({})'.format(self.uut_prefix), None, True, False])
+            d2.append(['Enter the IPv6 gateway for the management interface',
+                       'sendline({})'.format(self.uut_gateway6), None, True, False])
+        d2.append(['Enter a fully qualified hostname for this system ',
+                    'sendline({})'.format(self.hostname), None, True, False])
+        d2.append(['Enter a comma-separated list of DNS servers or',
+                    'sendline({})'.format(self.dns_server), None, True, False])
+        d2.append(['Enter a comma-separated list of search domains or',
+                    'sendline({})'.format(self.search_domains), None, True, False])
+        d2.append(['> ', 'sendline()', None, False, False])
         d2.process(self.spawn_id, timeout=900)
 
         logger.info('fully installed.')
@@ -510,6 +521,7 @@ class ElektraLine(BasicLine):
     def baseline_elektra(self, http_server, boot_image, pkg_image,
                          uut_ip, uut_netmask, uut_gateway, dns_server,
                          hostname='firepower', search_domains='cisco.com',
+                         uut_ip6=None, uut_prefix=None, uut_gateway6=None,
                          retry_count=MAX_RETRY_COUNT, ntp_server=None, **kwargs):
         """Baseline device of Elektra, install boot_image, pkg_image and verify
         image installed.
@@ -524,6 +536,9 @@ class ElektraLine(BasicLine):
         :param uut_ip: UUT IP address
         :param uut_netmask: UUT netmask
         :param uut_gateway: UUT gateway
+        :param uut_ip6: Device IPv6 Address
+        :param uut_prefix: Device IPv6 Prefix
+        :param uut_gateway6: Device IPv6 Gateway
         :param dns_server: DNS server
         :param hostname: hostname of the device to be set
         :param search_domains: search domains, defaulted to 'cisco.com'
@@ -542,6 +557,9 @@ class ElektraLine(BasicLine):
         self.uut_ip = uut_ip
         self.uut_netmask = uut_netmask
         self.uut_gateway = uut_gateway
+        self.uut_ip6 = uut_ip6
+        self.uut_prefix = uut_prefix
+        self.uut_gateway6 = uut_gateway6
         self.dns_server = dns_server
         self.hostname = hostname
         self.search_domains = search_domains

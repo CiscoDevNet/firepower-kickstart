@@ -9,6 +9,7 @@ of the state machine can be created by issueing
 The visual representation will be provided in sm.png file and the input should
 be provided in sm.dot (from the output of self.sm.dotgraph() call
 '''
+import logging
 import re
 
 import time
@@ -20,7 +21,9 @@ from unicon.utils import AttributeDict
 
 from .statements import ChassisStatements
 from .dialogs import ChassisDialogs
-from unicon.eal.dialogs import Dialog
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class ChassisStateMachine(StateMachine):
@@ -187,9 +190,11 @@ class ChassisStateMachine(StateMachine):
         for fpr_module_state in fpr_module_states:
             slot = fpr_module_state[:6].replace('slot_', '')
             console = 'telnet'
+            exit_console = 'exit'
             available_ftds_on_slot = self.get_available_ftds_on_slot(slot)
             if available_ftds_on_slot[0]['deploy_type'] == 'native':
                 console = 'console'
+                exit_console = '~'
             self.paths_dict.update({
                 'mio_to_' + fpr_module_state: Path(
                     self.states_dict['mio_state'],
@@ -204,7 +209,7 @@ class ChassisStateMachine(StateMachine):
                 fpr_module_state + '_to_mio': Path(
                     self.states_dict[fpr_module_state],
                     self.states_dict['mio_state'],
-                    "exit", self.dialogs.d_fpr_module_to_mio)
+                    exit_console, self.dialogs.d_fpr_module_to_mio)
             })
         self.paths_dict.update({
             'mio_to_local_mgmt': Path(
@@ -599,11 +604,17 @@ class ChassisStateMachine(StateMachine):
         # state or signal failure because going to 'any' state
         # can lead to circular transitions which go on in a loop
         # indefinetely
+        logger.info('Going from state {} to state {}'.format(self.current_state, to_state))
         if self.current_state == 'generic' and to_state is 'any':
             # try to detect in which state we are right now or fail
             # send a newline to initialize the prompt
-            spawn.sendline('')
+            output = spawn.expect('.*', timeout=30).match_output
+            if output.endswith('\x07'):
+                spawn.sendline('\x15')
+                spawn.sendline()
+                spawn.sendline()
             # wait 10 seconds for the prompt to populate
+            spawn.sendline()
             time.sleep(10)
             # match everything in the output buffer
             output = spawn.expect('.*', timeout=30).match_output
@@ -612,15 +623,18 @@ class ChassisStateMachine(StateMachine):
                 if isinstance(pattern, str):
                     if re.match(pattern, output.split('\r\n')[-1]):
                         self.update_cur_state(state_name)
+                        logger.info('Current state is {}'.format(state_name))
                         return output
                 if isinstance(pattern, list):
                     for pat in pattern:
                         if re.match(pat, output.split('\r\n')[-1]):
                             self.update_cur_state(state_name)
+                            logger.info('Current state is {}'.format(state_name))
                             return output
             raise RuntimeError('Could not detect current state. Please ' +
                                'connect to the chassis and bring it to ' +
-                               'the mio state prompt. Output is:' + output)
+                               'the mio state prompt. Output is: ' +
+                               '<BEGIN_OUTPUT>' + output + '<END_OUTPUT>')
         elif (self.current_state != 'generic' and to_state is 'any') or \
                 isinstance(to_state, list):
             expected_state = to_state

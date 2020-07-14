@@ -9,13 +9,26 @@ class FmcPatterns:
         """ Constructor for FmcPatterns
         """
         self.fqdn = hostname
-        self.hostname = hostname.split('.')[0]
+        self._hostname = hostname.split('.')[0]
         self.login_username = login_username
         self.login_password = login_password
         self.sudo_password = sudo_password
         self.username = 'admin'
         self.default_password = 'Admin123'
         self.prompt = munch.Munch()
+        self.set_prompt_patterns()
+
+    @property
+    def hostname(self):
+        return self._hostname
+
+    @hostname.setter
+    def hostname(self, value):
+        self.fqdn = self.fqdn.replace(self._hostname, value)
+        self._hostname = value
+        self.set_prompt_patterns()
+
+    def set_prompt_patterns(self):
 
         self.prompt.password_prompt = r'.*[Pp]assword: '
         self.prompt.prelogin_prompt = r'(({}|firepower) )login: '.format(self.hostname)

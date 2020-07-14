@@ -3,7 +3,11 @@
 Chassis prompt patterns
 
 """
+import logging
 import munch
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class ChassisPatterns:
@@ -45,3 +49,5 @@ class ChassisPatterns:
 
         # ASA level prompts
         self.prompt.asa_prompt = r'[\r\n]*asa.*?[>#] $'
+
+        logger.info('\n\n\nPrompts are: {}\n\n\n'.format(self.prompt))

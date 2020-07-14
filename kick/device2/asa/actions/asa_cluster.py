@@ -155,3 +155,65 @@ class AsaCluster():
                 (ASAClusterStates.DISABLED.value, ASAClusterStates.MASTER.value), output):
                 return self.pick_up_master()
         dump = unit.expect_prompt()
+
+    def get_unit_by_name(self, name):
+        """ Get unit ssh handle via its name
+
+        Many time, scripts need to extract unit name from "cluster exec show ..."
+        commands, and then execute cluster operations (exit/join) via its ssh handle.
+
+        For example, unit 'unit-1-1' can be identified from the below output and
+        then foreced to exit and rejoin cluster. Thus we need to get its corresponding
+        handle from its name and pass it to disable_unit(unit) and enable_unit(unit).
+
+        cluster exec show conn
+        unit-1-1(LOCAL):******************************************************
+        33 in use, 40 most used
+        Cluster:
+                fwd connections: 0 in use, 0 most used
+                dir connections: 0 in use, 0 most used
+                centralized connections: 0 in use, 9 most used
+                VPN redirect connections: 0 in use, 0 most used
+
+        UDP outside  10.2.0.10:2152 inside  10.1.0.10:0, idle 0:00:00, bytes 0, flags ji
+        UDP outside  10.2.0.10:0 inside  10.1.0.10:2152, idle 0:00:00, bytes 0, flags ji
+
+
+        unit-3-1:*************************************************************
+        17 in use, 29 most used
+        Cluster:
+                fwd connections: 0 in use, 0 most used
+                dir connections: 1 in use, 1 most used
+                centralized connections: 0 in use, 12 most used
+                VPN redirect connections: 0 in use, 0 most used
+
+        UDP outside  10.2.0.10:2152 inside  10.1.0.10:0, idle 0:00:01, bytes 0, flags ji
+        UDP outside  10.2.0.10:0 inside  10.1.0.10:2152, idle 0:00:01, bytes 0, flags ji
+        UDP outside  10.2.0.10:2123 inside  10.1.0.10:2123, idle 0:00:01, bytes 0, flags -Y
+
+
+        unit-2-1:*************************************************************
+        18 in use, 29 most used
+        Cluster:
+                fwd connections: 0 in use, 0 most used
+                dir connections: 0 in use, 0 most used
+                centralized connections: 0 in use, 12 most used
+                VPN redirect connections: 0 in use, 0 most used
+
+        UDP outside  10.2.0.10:2152 inside  10.1.0.10:0, idle 0:00:01, bytes 0, flags ji
+        UDP outside  10.2.0.10:2123 inside  10.1.0.10:2123, idle 0:00:01, bytes 1824, flags J
+        UDP outside  10.2.0.10:0 inside  10.1.0.10:2152, idle 0:00:01, bytes 0, flags ji
+
+        :param name: unit name, eg 'unit-1-1'
+        :return:
+            unit ssh handle if found
+            None otherwise
+        """
+        for unit in self.asa_instances:
+            dump = unit.expect_prompt()
+            output = unit.execute('show cluster info')
+            found = re.search('This is .%s.' % name, output)
+            if found:
+                return unit
+        else:
+            return None

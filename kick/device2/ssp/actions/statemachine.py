@@ -1,3 +1,15 @@
+'''
+In order to understand the state machine, the states and the paths
+between the states is it very trivial to place a breakpoint after the
+state machine has been constructed and use self.sm.dotgraph() call to
+get the state machine representation. This representation can then be
+placed in a text file and using dot.exe from Graphviz a visual representation
+of the state machine can be created by issueing
+<graphviz_bin_folder>\dot.exe -T png -o sm.png sm.dot
+The visual representation will be provided in sm.png file and the input should
+be provided in sm.dot (from the output of self.sm.dotgraph() call
+'''
+import logging
 import re
 import time
 from unicon.statemachine import State, Path, StateMachine
@@ -10,22 +22,21 @@ from unicon.utils import AttributeDict
 from .statements import SspStatements
 from .dialogs import SspDialogs
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
 
 class SspStateMachine(StateMachine):
     """An SSP class that restores all states."""
 
-    def __init__(self, patterns, hostname, deploy_type='native',
-                 app_identifier=''):
+    def __init__(self, patterns):
         """Initializer of SspStateMachine."""
 
-        self.deploy_type = deploy_type
-        self.app_identifier = app_identifier
         self.patterns = patterns
-        self.dialogs = SspDialogs(patterns, deploy_type)
+        self.dialogs = SspDialogs(patterns)
         self.statements = SspStatements(patterns)
-        self.dev_hostname = hostname
         self.states_dict = dict()
-        super().__init__(hostname)
+        super().__init__(self.patterns.hostname)
         # this is used to group the ftd "application" states
         self.ftd_states = None
 
@@ -109,7 +120,7 @@ class SspStateMachine(StateMachine):
             mio_state, fpr_module_state,
             "connect module {} telnet".format(self.patterns.slot_id),
             self.dialogs.d_mio_to_fpr_module)
-        if self.deploy_type == 'native':
+        if self.patterns.deploy_type == 'native':
             mio_to_fpr_module = Path(
                 mio_state, fpr_module_state,
                 "connect module {} console".format(self.patterns.slot_id),
@@ -117,7 +128,7 @@ class SspStateMachine(StateMachine):
 
         fpr_module_to_mio = Path(fpr_module_state, mio_state, "exit",
                                  self.dialogs.d_fpr_module_to_mio)
-        if self.deploy_type == 'native':
+        if self.patterns.deploy_type == 'native':
             fpr_module_to_mio = Path(fpr_module_state, mio_state, "~",
                                      self.dialogs.d_fpr_module_to_mio)
 
@@ -138,8 +149,8 @@ class SspStateMachine(StateMachine):
         cimc_to_mio = Path(cimc_state, mio_state, "exit", None)
 
         app_identifier = ''
-        if self.deploy_type == 'container':
-            app_identifier = self.app_identifier.lower()
+        if self.patterns.deploy_type == 'container':
+            app_identifier = self.patterns.app_identifier.lower()
         # Connect from blade module boot cli to FTD
         fpr_module_to_ftd = Path(
             fpr_module_state, fireos_state,
@@ -236,12 +247,15 @@ class SspStateMachine(StateMachine):
         # state or signal failure because going to 'any' state
         # can lead to circular transitions which go on in a loop
         # indefinetely
+        logger.info('Going from state {} to state {}'.format(self.current_state, to_state))
         if self.current_state == 'generic' and to_state is 'any':
             # try to detect in which state we are right now or fail
             # send a newline to initialize the prompt
             output = spawn.expect('.*', timeout=30).match_output
             if output.endswith('\x07'):
-                spawn.sendline('\x03')
+                spawn.sendline('\x15')
+                spawn.sendline()
+                spawn.sendline()
             # wait 10 seconds for the prompt to populate
             spawn.sendline()
             time.sleep(10)
@@ -252,11 +266,13 @@ class SspStateMachine(StateMachine):
                 if isinstance(pattern, str):
                     if re.search(pattern, output):
                         self.update_cur_state(state_name)
+                        logger.info('Current state is {}'.format(state_name))
                         return output
                 if isinstance(pattern, list):
                     for pat in pattern:
                         if re.search(pat, output):
                             self.update_cur_state(state_name)
+                            logger.info('Current state is {}'.format(state_name))
                             return output
             raise RuntimeError('Could not detect current state. Please ' +
                                'connect to the ssp and bring it to ' +

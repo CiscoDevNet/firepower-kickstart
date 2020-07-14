@@ -6,6 +6,7 @@ import re
 import os.path
 import subprocess
 
+
 from unicon.core.errors import StateMachineError
 from unicon.eal.dialogs import Dialog
 from unicon.eal.expect import Spawn
@@ -118,8 +119,8 @@ class Kp(BasicDevice):
             try:
                 spawn_id = Spawn(
                     'ssh -o UserKnownHostsFile=/dev/null '
-                    '-o StrictHostKeyChecking=no -l {usr} -p {port} {ip} \n'\
-                    .format(usr=username, port=port, ip=ip))
+                    '-o StrictHostKeyChecking=no -l {usr} -p {port} {ip} \n' \
+                        .format(usr=username, port=port, ip=ip))
                 d.process(spawn_id, context=ctx)
             except:
                 spawn_id.close()
@@ -163,7 +164,7 @@ class Kp(BasicDevice):
     # TODO
     # check with owners
     def log_checks(self, kp_line, list_files=['/var/log/boot_*'],
-                      search_strings=['fatal', 'error'], exclude_strings=[]):
+                   search_strings=['fatal', 'error'], exclude_strings=[]):
         """Wrapper function to get logs from from an ftd in Kilburn Park
         device.
 
@@ -298,9 +299,12 @@ class KpLine(BasicLine):
         self.chassis_line = chassis_line
         self.line_type = 'KpLine'
         self.change_password_flag = False
+        self.power_cycle_flag = False
 
         try:
             super().__init__(spawn_id, sm, type, timeout=timeout)
+            self.go_to('any')
+            self._set_to_proper_state()
         except:
             if not chassis_line:
                 raise RuntimeError("Unknown device state")
@@ -323,14 +327,20 @@ class KpLine(BasicLine):
         self.power_bar_user = KpConstants.power_bar_user
         self.power_bar_pwd = KpConstants.power_bar_pwd
 
+        self.go_to('any')
+
     def init_terminal(self, determine_state=True):
         """Initialize terminal size."""
+        ##### There were defects CSCvq86739, CSCvq96757 and CSCvq93377 where device prompt and command were lagging
+        #### This sleep provide to wait for prompt to come
+        time.sleep(5)
+        self.spawn_id.sendline()
         try:
             if determine_state:
                 self.go_to('any')
             self.go_to('fxos_state')
         except StateMachineError as exc:
-            logger.error('Cannot initialize FXOS terminal in KP: {}'.format(str(exc)), exc_info=True)
+            logger.error('Cannot initialize FXOS terminal: {}'.format(str(exc)), exc_info=True)
             return
 
         for cmd in KpInitCmds.split('\n'):
@@ -341,8 +351,9 @@ class KpLine(BasicLine):
 
     def disconnect(self):
         """Disconnect the Device."""
-        if self.chassis_line:
-            self.go_to('fxos_state')
+        if self.spawn_id is not None:
+            if self.chassis_line:
+                self.go_to('fxos_state')
         super().disconnect()
 
     def expect_and_sendline(self, this_spawn, es_list, timeout=10):
@@ -374,7 +385,9 @@ class KpLine(BasicLine):
                 to = int(es[2])
             else:
                 raise RuntimeError("Unknown expect_and sendline input")
-
+            #####Any first command is sending with trimming some character, issue with unicon. Added fix for (CSCvs29201)####
+            time.sleep(5)
+            this_spawn.sendline()
             this_spawn.sendline(send_string)
             this_spawn.expect(exp_pattern, timeout=to)
 
@@ -439,7 +452,8 @@ class KpLine(BasicLine):
         if power_bar_server or power_bar_port:
             self.set_power_bar(power_bar_server, power_bar_port, power_bar_user, power_bar_pwd)
 
-        result = power_cycle_all_ports(self.power_bar_server, self.power_bar_port, self.power_bar_user, self.power_bar_pwd)
+        result = power_cycle_all_ports(self.power_bar_server, self.power_bar_port, self.power_bar_user,
+                                       self.power_bar_pwd)
 
         if wait_until_device_is_on:
             self.wait_until_device_on(timeout=timeout)
@@ -477,21 +491,22 @@ class KpLine(BasicLine):
         output = self.execute_lines(cmd_lines)
 
         AppInstance = collections.namedtuple('AppInstance',
-            ['application_name', 'slot_id', 'admin_state', 'operational_state', 'running_version',
-            'startup_version', 'cluster_oper_state', 'cluster_role', 'job_type', 'job_progress',
-            'job_state', 'clear_log_data', 'error_msg', 'hotfixes', 'externally_upgraded'])
+                                             ['application_name', 'slot_id', 'admin_state', 'operational_state',
+                                              'running_version', 'startup_version', 'cluster_oper_state',
+                                              'cluster_role', 'job_type', 'job_progress', 'job_state',
+                                              'clear_log_data', 'error_msg', 'hotfixes', 'externally_upgraded'])
         app_instance_list = []
 
         blocks = [i.start() for i in re.finditer('Application Name:', output)]
         if blocks:
             blocks.append(len(output))
-            for i in range(0, len(blocks)-1):
+            for i in range(0, len(blocks) - 1):
                 name = slot = admin_state = oper_state = \
-                running_version = startup_version = cluster_oper_state = job_type = \
-                job_progress = job_state = clear_log_data = error_msg = hotfixes = \
-                externally_upgraded = cluster_role = None
+                    running_version = startup_version = cluster_oper_state = job_type = \
+                    job_progress = job_state = clear_log_data = error_msg = hotfixes = \
+                    externally_upgraded = cluster_role = None
 
-                for line in output[blocks[i]: blocks[i+1]].splitlines():
+                for line in output[blocks[i]: blocks[i + 1]].splitlines():
                     line = line.strip()
                     match = re.search('(.*):(.*)', line)
                     if match:
@@ -528,12 +543,12 @@ class KpLine(BasicLine):
                         elif key == 'Externally Upgraded':
                             externally_upgraded = value
                 app_instance = AppInstance(application_name=name, slot_id=slot,
-                    admin_state=admin_state, operational_state=oper_state,
-                    running_version=running_version, startup_version=startup_version,
-                    cluster_oper_state=cluster_oper_state, cluster_role=cluster_role,
-                    job_type=job_type, job_progress=job_progress, job_state=job_state,
-                    clear_log_data=clear_log_data, error_msg=error_msg, hotfixes=hotfixes,
-                    externally_upgraded=externally_upgraded)
+                                           admin_state=admin_state, operational_state=oper_state,
+                                           running_version=running_version, startup_version=startup_version,
+                                           cluster_oper_state=cluster_oper_state, cluster_role=cluster_role,
+                                           job_type=job_type, job_progress=job_progress, job_state=job_state,
+                                           clear_log_data=clear_log_data, error_msg=error_msg, hotfixes=hotfixes,
+                                           externally_upgraded=externally_upgraded)
                 app_instance_list.append(app_instance)
 
         return app_instance_list
@@ -557,7 +572,7 @@ class KpLine(BasicLine):
                 package_list.append(Package(name=package_name, version=package_version))
         return package_list
 
-    def _get_download_status(self, image_name):
+    def _get_download_status(self, image_name, timeout=120):
         """Gets the status of download
 
         :param image_name: the name of the image. it should look like:
@@ -565,10 +580,9 @@ class KpLine(BasicLine):
         :return: status as 'Downloaded' or 'Downloading'
 
         """
-
         self.go_to('fxos_state')
         output = self.execute('show download-task {} detail | grep State'
-                              ''.format(image_name))
+                              ''.format(image_name), timeout=timeout)
 
         r = re.search('State: (\w+)', output)
 
@@ -774,7 +788,7 @@ class KpLine(BasicLine):
     def wait_for_rommon(self, timeout):
         # The system will reboot, wait for the following prompts
         d = Dialog([['Boot in 10 seconds.', 'sendline({})'.format(chr(27)), None, False, False],
-                   [self.sm.get_state('rommon_state').pattern, None, None, False, False],
+                    [self.sm.get_state('rommon_state').pattern, None, None, False, False],
                     ])
         d.process(self.spawn_id, timeout=timeout)
         self.sm.update_cur_state('rommon_state')
@@ -787,6 +801,8 @@ class KpLine(BasicLine):
         :param format_timeout: int seconds to wait for rommon after format everything
         :return: None
         """
+
+        self.change_password_flag = False
         if self.sm.current_state != 'rommon_state':
             self.go_to('any')
             self.power_cycle_goto_rommon(timeout=format_timeout)
@@ -799,6 +815,14 @@ class KpLine(BasicLine):
             [' yes/no .*:', 'sendline(yes)', None, False, False],
         ])
         d1.process(self.spawn_id, timeout=30)
+
+        if self.line_type is 'WmLine':
+            d11 = Dialog([
+                ['Please type \'ERASE\' to confirm the operation', 'sendline(ERASE)', None, True, False],
+                [' yes/no .*:', 'sendline(yes)', None, False, False],
+                ['rommon.*> ', None, None, False, False],
+            ])
+            d11.process(self.spawn_id, timeout=30)
 
         self.spawn_id.sendline('boot')
         d2 = Dialog([
@@ -836,6 +860,7 @@ class KpLine(BasicLine):
         # self.go_to('rommon_state')
         logger.info('add rommon config')
         es_list = [
+            ['rommon', 'set'],
             ['rommon', 'address {}'.format(uut_ip)],
             ['rommon', 'netmask {}'.format(uut_netmask)],
             ['rommon', 'gateway {}'.format(uut_gateway)],
@@ -843,7 +868,13 @@ class KpLine(BasicLine):
             ['rommon', 'image {}'.format(rommon_file)],
             ['rommon', 'sync'],
         ]
-        self.expect_and_sendline(self.spawn_id, es_list)
+        self.expect_and_sendline(self.spawn_id, es_list, timeout=20)
+
+        try:
+            self.check_settings_in_rommon(tftp_server, rommon_file, uut_ip, uut_netmask, uut_gateway)
+        except RuntimeError:
+            logger.info(">>>>>> In ROMMON: set network configuration again")
+            self.expect_and_sendline(self.spawn_id, es_list, timeout=20)
 
         for i in range(20):
             self.spawn_id.sendline('ping {}'.format(tftp_server))
@@ -885,7 +916,7 @@ class KpLine(BasicLine):
 
         try:
             d.process(self.spawn_id, timeout=timeout)
-            #self.spawn_id.sendline()
+            # self.spawn_id.sendline()
             logger.info("=== Rommon file was installed successfully.")
         except:
             logger.info("=== Rommon file download failed, raise runtime error. ")
@@ -894,8 +925,8 @@ class KpLine(BasicLine):
                 "tftp_server: {}, image file: {}".format(tftp_server, rommon_file))
 
         # handle change fxos password dialog
+        self.change_password_flag = False
         self.__change_password()
-        self.spawn_id.sendline()
 
     def install_rommon_build_fp2k(self, tftp_server, rommon_file,
                                   uut_ip, uut_netmask, uut_gateway,
@@ -922,10 +953,6 @@ class KpLine(BasicLine):
         logger.info('=== Drop device into rommon mode')
         if self.sm.current_state != 'rommon_state':
             self.format_goto_rommon(timeout=format_timeout)
-        else:
-            # issue factory reset from rommon and
-            # then format everything in order to reset the device to default values
-            self.rommon_factory_reset_and_format(format_timeout=format_timeout)
 
         logger.info('=== Configure management network interface')
         self.rommon_configure(tftp_server, rommon_file,
@@ -935,16 +962,15 @@ class KpLine(BasicLine):
         self.rommon_tftp_download(tftp_server, rommon_file, username)
 
         time.sleep(60)
-        self.init_terminal()
         logger.info('=== Rommon build installed.')
+        self.init_terminal()
 
     def upgrade_bundle_package_fp2k(self, bundle_package_name, ftd_version,
-                                    uut_hostname, uut_password,
-                                    uut_ip, uut_netmask, uut_gateway,
+                                    uut_hostname, uut_password,uut_ip, uut_netmask, uut_gateway,
                                     dns_servers, search_domains,
                                     mode,
                                     uut_ip6, uut_prefix, uut_gateway6,
-                                    firewall_mode, timeout=3600):
+                                    firewall_mode,timeout=3600,dhcp=False):
         """Upgrade the ftd package and configure device.
 
         :param bundle_package_name: combined fxos and ftd image
@@ -965,6 +991,7 @@ class KpLine(BasicLine):
         :param manager_key: Registration key
         :param manager_nat_id: Registration NAT Id
         :param firewall_mode: the firewall mode (routed, transparent, ngips)
+        :param dhcp: dhcp enabled or disable during FTD network configuration , default is "False"
         :param timeout: time to wait for installing the security package
         :return: None
 
@@ -996,32 +1023,39 @@ class KpLine(BasicLine):
             ['INFO: Power-On Self-Test complete.', None, None, True, False],
             ['INFO: SW-DRBG health test passed.', None, None, True, False],
             ['Failed logins since the last login:', None, None, False, False],
-            #['[a-zA-Z0-9_-]+[^<]*[^>]>[^>]', 'sendline()', None, False, False],
+            ['Logins over the last', None, None, True, False],
+            # ['[a-zA-Z0-9_-]+[^<]*[^>]>[^>]', 'sendline()', None, False, False],
             [self.sm.patterns.prompt.rommon_prompt, 'sendline({})'.format('boot'), None, True, False],
         ])
-        resp = d1.process(self.spawn_id, timeout=timeout)
-        if isinstance(resp, ExpectMatch):
-            if 'Invalid Software Version' in resp.match_output:
-                logger.error('Invalid Software Version,  please check your installation package')
-                raise RuntimeError('Invalid Software Version,  please check your installation package')
-
+        ###Below fix is for defect CSCvq24032 where device was stuck in the FTD installation dialog###
+        try:
+            resp = d1.process(self.spawn_id, timeout=timeout)
+            if isinstance(resp, ExpectMatch):
+                if 'Invalid Software Version' in resp.match_output:
+                    logger.error('Invalid Software Version,  please check your installation package')
+                    raise RuntimeError('Invalid Software Version,  please check your installation package')
+        except:
+            self.spawn_id.buffer = ''
+        #### End of fix####
         # send an ENTER to hit the prompt
         fxos_login_password = self.sm.patterns.login_password if self.change_password_flag else \
             self.sm.patterns.default_password
-
         self.spawn_id.sendline()
         d2 = Dialog([
-            ['[a-zA-Z0-9_-]+[^\bLast \b] login: ', 'sendline(admin)', None, True, False],
+            ['[ -~]+(?<!Last)(?<!failed) login: ', 'sendline({})'.format(self.sm.patterns.login_username),
+             None, True, False],
             ['Password: ', 'sendline({})'.format(fxos_login_password), None, True, False],
+            ['Enter new password:', 'sendline({})'.format(uut_password), None, True, False],
+            ['Confirm new password:', 'sendline({})'.format(uut_password), None, True, False],
             ['firepower.*#', 'sendline({})'.format('connect ftd'), None, True, False],
             ['Press <ENTER> to display the EULA: ', 'sendline()', None, False, False],
+
         ])
         d2.process(self.spawn_id, timeout=180)
-
         d3 = Dialog([
-            ['--More--', 'send(q)', None, False, False],
-            ["Please enter 'YES' or press <ENTER> to AGREE to the EULA: ", 'sendline()', None, False, False],
-        ])
+                ['--More--', 'send(q)', None, False, False],
+                ["Please enter 'YES' or press <ENTER> to AGREE to the EULA: ", 'sendline()', None, False, False],
+            ])
 
         d3.process(self.spawn_id, timeout=180)
 
@@ -1033,37 +1067,53 @@ class KpLine(BasicLine):
         ])
         d4.process(self.spawn_id, timeout=360)
 
-        d5 = Dialog([
-            ['Do you want to configure IPv4', 'sendline(y)', None, True, False],
-        ])
-        if uut_ip6 is None:
-            d5.append(['Do you want to configure IPv6', 'sendline(n)', None, True, False])
+        if dhcp:
+
+            d5 = Dialog([
+                ['Do you want to configure IPv4', 'sendline(y)', None, True, False],
+            ])
+            if uut_ip6 is None:
+                d5.append(['Do you want to configure IPv6', 'sendline(n)', None, True, False])
+            else:
+                d5.append(['Do you want to configure IPv6', 'sendline(y)', None, True, False])
+            d5.append(['Configure IPv4 via DHCP or manually', 'sendline(dhcp)', None,
+                       True, False])
+            d5.append(['For HTTP Proxy configuration, run \'configure network http-proxy\'', None, None, False, False])
+
+            d5.process(self.spawn_id, timeout=600)
         else:
-            d5.append(['Do you want to configure IPv6', 'sendline(y)', None, True, False])
-        d5.append(['Configure IPv4 via DHCP or manually', 'sendline(manual)', None,
-                   True, False])
-        d5.append(['Enter an IPv4 address for the management interface',
-                   'sendline({})'.format(uut_ip), None, True, False])
-        d5.append(['Enter an IPv4 netmask for the management interface',
-                   'sendline({})'.format(uut_netmask), None, True, False])
-        d5.append(['Enter the IPv4 default gateway for the management interface',
-                   'sendline({})'.format(uut_gateway), None, True, False])
-        if uut_ip6 is not None:
-            d5.append(['Configure IPv6 via DHCP, router, or manually',
-                       'sendline(manual)', None, True, False])
-            d5.append(['Enter the IPv6 address for the management interface',
-                       'sendline({})'.format(uut_ip6), None, True, False])
-            d5.append(['Enter the IPv6 address prefix for the management interface',
-                       'sendline({})'.format(uut_prefix), None, True, False])
-            d5.append(['Enter the IPv6 gateway for the management interface',
-                       'sendline({})'.format(uut_gateway6), None, True, False])
-        d5.append(['Enter a fully qualified hostname for this system ',
-                   'sendline({})'.format(uut_hostname), None, True, False])
-        d5.append(['Enter a comma-separated list of DNS servers or',
-                   'sendline({})'.format(dns_servers), None, True, False])
-        d5.append(['Enter a comma-separated list of search domains or',
-                   'sendline({})'.format(search_domains), None, False, False])
-        d5.process(self.spawn_id, timeout=600)
+
+            d5 = Dialog([
+                ['Do you want to configure IPv4', 'sendline(y)', None, True, False],
+            ])
+            if uut_ip6 is None:
+                d5.append(['Do you want to configure IPv6', 'sendline(n)', None, True, False])
+            else:
+                d5.append(['Do you want to configure IPv6', 'sendline(y)', None, True, False])
+            d5.append(['Configure IPv4 via DHCP or manually', 'sendline(manual)', None,
+                       True, False])
+            d5.append(['Enter an IPv4 address for the management interface',
+                       'sendline({})'.format(uut_ip), None, True, False])
+            d5.append(['Enter an IPv4 netmask for the management interface',
+                       'sendline({})'.format(uut_netmask), None, True, False])
+            d5.append(['Enter the IPv4 default gateway for the management interface',
+                       'sendline({})'.format(uut_gateway), None, True, False])
+            if uut_ip6 is not None:
+                d5.append(['Configure IPv6 via DHCP, router, or manually',
+                           'sendline(manual)', None, True, False])
+                d5.append(['Enter the IPv6 address for the management interface',
+                           'sendline({})'.format(uut_ip6), None, True, False])
+                d5.append(['Enter the IPv6 address prefix for the management interface',
+                           'sendline({})'.format(uut_prefix), None, True, False])
+                d5.append(['Enter the IPv6 gateway for the management interface',
+                           'sendline({})'.format(uut_gateway6), None, True, False])
+            d5.append(['Enter a fully qualified hostname for this system ',
+                       'sendline({})'.format(uut_hostname), None, True, False])
+            d5.append(['Enter a comma-separated list of DNS servers or',
+                       'sendline({})'.format(dns_servers), None, True, False])
+            d5.append(['Enter a comma-separated list of search domains or',
+                       'sendline({})'.format(search_domains), None, False, False])
+            d5.process(self.spawn_id, timeout=600)
 
         d6 = Dialog([
             ['Configure (firewall|deployment) mode', 'sendline({})'.format(firewall_mode),
@@ -1079,6 +1129,13 @@ class KpLine(BasicLine):
         d6.append([self.sm.patterns.prompt.fireos_prompt, 'sendline()', None, False, False])
         d6.process(self.spawn_id, timeout=900)
 
+        # by the time we finish the above dialogs, and fireos_prompt is seen, we should now be in fireos_state
+        self.sm.update_cur_state('fireos_state')
+        ###Bug fix for CSCvu57632 ####
+        self.go_to("fxos_state")
+        self.execute_lines('scope security\nscope default-auth\nset absolute-session-timeout 0\nset session-timeout 0\ncommit-buffer\ntop')
+        self.go_to("fireos_state")
+        ####End of fix ###
         logger.info('fully installed.')
 
     def configure_manager(self, manager, manager_key, manager_nat_id):
@@ -1131,7 +1188,7 @@ class KpLine(BasicLine):
                           mode='local',
                           uut_ip6=None, uut_prefix=None, uut_gateway6=None,
                           manager=None, manager_key=None, manager_nat_id=None,
-                          firewall_mode='routed', timeout=3600, reboot_timeout=300):
+                          firewall_mode='routed', timeout=3600, reboot_timeout=300,dhcp=False):
         """Upgrade the package and configure device.
 
         :param tftp_server: tftp server to get rommon and fxos images
@@ -1153,6 +1210,7 @@ class KpLine(BasicLine):
         :param file_server_password: if use scp protocol, this is the password to
                download the image
         :param power_cycle_flag: if True power cycle the device before baseline
+        :param dhcp: Flag to enable the DHCP client on FTD, default is "False"
         :param mode: the manager mode (local, remote)
         :param uut_ip6: Device IPv6 Address
         :param uut_prefix: Device IPv6 Prefix
@@ -1165,16 +1223,19 @@ class KpLine(BasicLine):
                         default value is 3600s
         :param reboot_timeout: in seconds; time to wait for system to restart;
                         default value is 300s
-        :return: None
+
+        :return: dhcp_ip
 
         """
         publish_kick_metric('device.kp.baseline', 1)
         # Power cycle the device if power_cycle_flag is True
         logger.info('=== Power cycle the device if power_cycle_flag is True')
         logger.info('=== power_cycle_flag={}'.format(str(power_cycle_flag)))
+
+        self.power_cycle_flag = power_cycle_flag
+
         if power_cycle_flag:
             self.power_cycle_goto_rommon(timeout=reboot_timeout)
-            self.rommon_factory_reset_and_format(format_timeout=reboot_timeout)
 
         # Drop fp2k to rommon mode
         # Download rommon build and Install the build
@@ -1194,6 +1255,9 @@ class KpLine(BasicLine):
         domain = uut_hostname.partition('.')[2]
         if domain == '':
             domain = search_domains
+        # Software Error: Exception during execution:
+        # [Error: Timed out communicating with DME]
+        time.sleep(120)
         cmd_lines_initial = """
             top
             scope system
@@ -1242,25 +1306,37 @@ class KpLine(BasicLine):
                                          dns_servers=dns_servers,
                                          search_domains=search_domains,
                                          mode=mode,
-                                         firewall_mode=firewall_mode,
+                                         firewall_mode=firewall_mode,dhcp=dhcp,
                                          timeout=timeout)
+
 
         self.go_to('any')
         self.go_to('fireos_state')
-
         if manager is not None and mode != 'local':
             logger.info('=== Configure manager ...')
             self.configure_manager(manager=manager, manager_key=manager_key,
                                    manager_nat_id=manager_nat_id)
 
+        if dhcp:
+            self.go_to('fxos_state')
+            self.init_terminal()
+            self.go_to('fireos_state')
+            logger.info('======DHCP IP======')
+            dhcp_ip = self.network_detail()
+            logger.info('Network details extracted  successfully.')
+            return dhcp_ip
+        else:
+            pass
+        self.go_to('any')
+        self.go_to('fireos_state')
         logger.info('=== Validate installed version ...')
         self.validate_version(ftd_version=ftd_version)
-
         logger.info('Installation completed successfully.')
 
     def baseline_by_branch_and_version(self, site, branch, version,
-                                       uut_ip, uut_netmask, uut_gateway,
-                                       dns_server='', serverIp='', tftpPrefix='', scpPrefix='', docs='', **kwargs):
+                                       uut_ip=None, uut_netmask=None, uut_gateway=None,
+                                       dns_server='', serverIp='', tftpPrefix='', scpPrefix='', docs='', only_ftd=False, dhcp=False,
+                                       **kwargs):
         """Baseline Kp by branch and version using PXE servers.
         Look for needed files on devit-engfs, copy them to the local kick server
         and use them to baseline the device.
@@ -1293,8 +1369,9 @@ class KpLine(BasicLine):
                         default value is 3600s
         :param reboot_timeout: in seconds; time to wait for system to restart;
                         default value is 300s
-        :return: None
-
+        :param only_ftd: Flag to install only FTD package, default is "False"
+        :param dhcp: Flag to baselie with DHCP client enabled, default is "False"
+        :return: dhcp_ip
         """
 
         if KICK_EXTERNAL:
@@ -1305,44 +1382,52 @@ class KpLine(BasicLine):
         else:
             server_ip, tftp_prefix, scp_prefix, files = prepare_installation_files(site, 'Kp', branch, version)
         try:
-            rommon_file = [file for file in files if file.startswith('fxos-k8-fp2k-lfbff')][0]
+            rommon_file = self._get_rommon_file(branch, version, files)
+
         except Exception as e:
             raise Exception('Got {} while getting fxos file'.format(e))
         rommon_image = os.path.join(tftp_prefix, rommon_file)
         files.remove(rommon_file)
         pkg_file = files[0]
         ftd_file = os.path.join('tftp://{}'.format(server_ip), tftp_prefix, pkg_file)
-
+        logger.info('FDT image download path is {} '.format(ftd_file))
         if not kwargs.get('ftd_version'):
             ftd_version = re.findall(r'[\d.]+-[\d]+', version)[0]
             kwargs['ftd_version'] = ftd_version
-
-        kwargs['tftp_server'] = server_ip
-        kwargs['rommon_file'] = rommon_image
+        ###########Keyword Argument common on baseline_fp2k_ftd and  baseline_ftd ######
         kwargs['fxos_url'] = ftd_file
         kwargs['uut_ip'] = uut_ip
         kwargs['uut_netmask'] = uut_netmask
         kwargs['uut_gateway'] = uut_gateway
         kwargs['dns_servers'] = dns_server
+        kwargs['dhcp'] = dhcp
         kwargs['search_domains'] = kwargs.get('search_domains', 'cisco.com')
         kwargs['uut_hostname'] = kwargs.get('uut_hostname', 'firepower')
-        kwargs['uut_username'] = kwargs.get('uut_username', 'admin')
         kwargs['uut_password'] = kwargs.get('uut_password', 'Admin123')
-
-        self.baseline_fp2k_ftd(**kwargs)
+        logger.info("=======keyword arguments are======= ", kwargs)
+        if only_ftd:
+            dhcp_ip = self.baseline_ftd(**kwargs)
+        else:
+            kwargs['tftp_server'] = server_ip
+            kwargs['rommon_file'] = rommon_image
+            kwargs['uut_username'] = kwargs.get('uut_username', 'admin')
+            dhcp_ip = self.baseline_fp2k_ftd(**kwargs)
+        return dhcp_ip
 
     def __change_password(self):
 
         # handle change password enforcement at first login
         change_password_dialog = Dialog([
-            ['You are required to change your password', None, None, True, False],
+            ['You (are required to|must) change your password', None, None, True, False],
             ['System is coming up', lambda: time.sleep(60), None, True, False],
-            ['[a-zA-Z0-9_-]+[^\bLast \b] login:', 'sendline({})'.format(self.sm.patterns.login_username), None, True, False],
-            ['Password: ', 'sendline({})'.format(self.sm.patterns.default_password), None, True, False],
+            ['Password: ', 'sendline({})'.format(self.sm.patterns.login_password), None, True, False],
+            ['[ -~]+(?<!Last)(?<!failed) login: ', 'sendline({})'.format(self.sm.patterns.login_username), None, True,
+             False],
             ['Enter old password:', 'sendline({})'.format(self.sm.patterns.default_password), None, True, False],
             ['Enter new password:', 'sendline({})'.format(self.sm.patterns.login_password), None, True, False],
             ['Confirm new password:', 'sendline({})'.format(self.sm.patterns.login_password), None, True, False],
             ['Your password (was|has been) updated successfully', None, None, False, False],
+            ['Login timed out', None, None, False, False],
             [self.sm.patterns.prompt.fxos_prompt, None, None, False, False]
         ])
 
@@ -1350,5 +1435,244 @@ class KpLine(BasicLine):
         if 'updated successfully' in output.match_output:
             self.change_password_flag = True
             logger.info('Password has been changed successfully')
+        elif 'Login timed out' in output.match_output:
+            logger.error('Logging in to FXOS failed with {} password. Exiting...\n Please make sure you have provided '
+                         'the correct device credentials before starting the baseline'.
+                         format(self.sm.patterns.login_password))
+            raise RuntimeError('Incorrect Login password.')
+        elif 'Password:' in output.match_output:
+            logger.info('Successfully logged in with {} password'.format(self.sm.patterns.login_password))
         else:
             logger.info('Changing password was not required...')
+
+        if self.power_cycle_flag:
+            logger.info('Device was rebooted from a remote power unit. \n Waiting for '
+                        'initialization to complete before reinstalling the application')
+            wait_for_ftd_init = Dialog([
+                ['Cisco FTD initializing', None, None, True, False],
+                ['Verifying the signature of the Application image', 'sendline()', None, False, False],
+                ['Failed logins since the last login:', None, None, False, False],
+                ['INFO: SW-DRBG health test passed.', None, None, True, False],
+                ['Cisco FTD installation finished successfully', None, None, True, False],
+                ['[a-zA-Z0-9_-]+[^<]*[^>][>#][^>]', 'sendline()', None, False, False]
+            ])
+            wait_for_ftd_init.process(self.spawn_id, timeout=600)
+
+    def _is_split_version(self, version):
+        """
+        Whether the version may (combined with the right branch) use split fxos image.
+
+        :param version:
+        :return: True or False
+        """
+        r = re.search('^6.(\d)', version)
+        if not r:
+            raise RuntimeError("Cannot parse version {}".format(version))
+        else:
+            # split starts at 6.5
+            return int(r.group(1)) >= 5
+
+    def _get_rommon_file(self, branch, version, files):
+        """
+        Find the proper rommon_file.
+
+        For old releases, it is always fxos-k8-fp2k-lfbff..., or fxos-k8-lfbff..., regardless
+        of KP or WM. In new releases, it will be fxos-k8-fp2k for KP, fxos-k8-fp1k for WM.
+
+        :param branch: such as Release
+        :param version: such as 6.4.0-102
+        :param files: list of files from prepare_installation_files()
+                For example: ['cisco-ftd-fp2k.6.4.0-102.SPA',
+                              'fxos-k8-fp2k-lfbff.2.6.1.133.SPA',
+                              'fxos-k8-fp2k-lfbff.2.6.1.133i.SSB']
+        :return:
+        """
+
+        if self._is_split_version(version):
+            p = 'fxos-k8-fp2k-lfbff.*'
+        else:
+            p = 'fxos-k8-(fp2k-)?lfbff.*'
+
+        if branch == 'Release':
+            p += 'SPA'
+        else:
+            p += 'SSB'
+
+        for f in files:
+            if re.search(p, f):
+                return f
+        else:
+            raise RuntimeError("Cannot file rommon_file in list of {}".format(files))
+
+    def _in_enable_not_fxos_state(self,timeout=None):
+        """
+        Tell whether device is in "enable_state" or "fxos_state".
+
+        There may be a confusion in these two states (the prompts look similar). Run "show version" and
+        read the output. If "Boot Loader version:" is seen, it is fxos_state. If "Cisco Adaptive Security
+         Appliance Software Version" is seen, it is in enable_state.
+        :return: True - in enable_state, or False - in fxos_state
+        """
+        ##### There were defects CSCvq86739, CSCvq96757 and CSCvq93377 where device prompt and command were lagging
+        #### This sleep provide to wait for prompt to come
+        time.sleep(2)
+        valid_messages = ["Boot Loader version:", "Startup-Vers:", "Package-Vers:", "Platform-Vers:"]
+        r = self.execute("show version | include [Vv]ers", timeout=10)
+        if "Cisco Adaptive Security Appliance Software Version" in r:
+            logger.debug("device in enable_state, not fxos_state")
+            return True
+        elif any(message in r for message in valid_messages):
+            # for KP and WM, in fxos_state, old version will include a line "Boot Loader version:".
+            # new version will include a line "Startup-Vers:".
+            logger.debug("device in fxos_state, not enable_state")
+            return False
+        else:
+            raise RuntimeError("Can't tell either enable_state or fxos_state")
+
+    def _set_to_proper_state(self):
+        """
+        Set to the proper state.
+
+        If in enable_state or fxos_state, check which state we are in, by _in_enable_not_fxos_state().
+        Then set the state properly. If in other states, do thing.
+        :return: None
+        """
+
+        if self.sm.current_state in ['enable_state', 'fxos_state']:
+            logger.debug("trying to see if truly in enable_state or fxos_state")
+            if self._in_enable_not_fxos_state():
+                logger.debug("setting current_state to enable_state")
+                self.sm.update_cur_state('enable_state')
+            else:
+                logger.debug("setting current_state to fxos_state")
+                self.sm.update_cur_state('fxos_state')
+        else:
+            logger.debug("no change on current_state")
+
+    def go_to(self, state, **kwargs):
+        """
+        In case we land in "fxos_state" or "enable_state", double check that we are in
+        the correct state as we think. Then do go_to()
+        :param state:
+        :param kwargs:
+        :return:
+        """
+        self._set_to_proper_state()
+        super().go_to(state, **kwargs)
+
+    def baseline_ftd(self, uut_hostname, uut_password,
+                     uut_ip, uut_netmask, uut_gateway,
+                     dns_servers, search_domains,
+                     fxos_url, ftd_version, file_server_password="",
+                     mode='local',
+                     uut_ip6=None, uut_prefix=None, uut_gateway6=None,
+                     firewall_mode='routed',timeout=3600,dhcp=False):
+        """Upgrade the FTD package and configure device.
+
+        :param uut_hostname: Device Host Name in the prompt
+        :param uut_password: Password to login to uut
+        :param uut_ip: Device IP Address to access TFTP Server
+        :param uut_netmask: Device Netmask
+        :param uut_gateway: Device Gateway
+        :param dns_servers: DNS Servers
+        :param search_domains: Search Domains
+        :param fxos_url: FXOS+FTD image url,
+               e.g. 'tftp://10.89.23.80/netboot/ims/Development/6.2.1-1177/'
+                    'installers/cisco-ftd-fp2k.6.2.1-1177.SSA'
+        :param ftd_version: ftd version, e.g. '6.2.1-1177'
+        :param file_server_password: if use scp protocol, this is the password to
+               download the image
+        :param mode: the manager mode (local, remote)
+        :param uut_ip6: Device IPv6 Address
+        :param uut_prefix: Device IPv6 Prefix
+        :param uut_gateway6: Device IPv6 Gateway
+        :param firewall_mode: the firewall mode (routed, transparent, ngips)
+        :param timeout: in seconds; time to wait for installing the security package;
+                        default value is 3600s
+        :param reboot_timeout: in seconds; time to wait for system to restart;
+                        default value is 300s
+        :param dhcp: Flag to do the network configuration using DHCP , default is "False"
+        :return: dhcp_ip
+
+        """
+        publish_kick_metric('device.kp.baseline', 1)
+        logger.info('=== Download fxos package, select download protocol')
+        logger.info('=== based on the url prefix tftp or scp')
+        ####tftp download of FTD package , package will also contain compatible fxos###
+        self.download_ftd_fp2k(fxos_url=fxos_url,
+                               file_server_password=file_server_password,
+                               ftd_version=ftd_version)
+        # Upgrade fxos/ftd package
+        logger.info('=== Upgrade fxos package')
+        bundle_package = fxos_url.split('/')[-1].strip()
+        self.upgrade_bundle_package_fp2k(bundle_package_name=bundle_package,
+                                         ftd_version=ftd_version,
+                                         uut_hostname=uut_hostname,
+                                         uut_password=uut_password,
+                                         uut_ip=uut_ip,
+                                         uut_netmask=uut_netmask,
+                                         uut_gateway=uut_gateway,
+                                         uut_ip6=uut_ip6,
+                                         uut_prefix=uut_prefix,
+                                         uut_gateway6=uut_gateway6,
+                                         dns_servers=dns_servers,
+                                         search_domains=search_domains,
+                                         mode=mode,
+                                         firewall_mode=firewall_mode,
+                                         dhcp=dhcp,
+                                         timeout=timeout)
+
+        if dhcp:
+            self.go_to('fxos_state')
+            self.init_terminal()
+            self.go_to('fireos_state')
+            logger.info('======Network configuration using DHCP======')
+            dhcp_ip = self.network_detail()
+            logger.info('Network details extracted  successfully.')
+            return dhcp_ip
+        else:
+            pass
+        self.go_to('any')
+        self.go_to('fireos_state')
+        logger.info('=== Validate installed version ...')
+        self.validate_version(ftd_version=ftd_version)
+        logger.info('Installation completed successfully.')
+
+    def network_detail(self):
+        """Get and return the IP assigned by dhcp  , e.g. '192.168.0.106'
+
+        :return: ip
+
+        """
+
+        global ip
+        ####This sleep is added to reflect the DHCP network configuration on FTD#####
+        time.sleep(10)
+        response_output = self.execute('show network', 20)
+        ip = re.findall(r'Address\s+:(\s\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', str(response_output))[0]
+        logger.debug("DHCP IP is ", ip)
+        if 'Address' in response_output and ip is not None:
+            logger.info('>>>>>> show network result:\n{}\ncontains '
+                            'DHCP IP: {}'.format(str(response_output), ip))
+            logger.info('DHCP IP validated')
+        else:
+            logger.error('Exception: IP not assign to management')
+            raise RuntimeError('>>>>>> show network result:\n{}\ndoes not contain'
+                               'DHCP IP : {}; Please check the dhcp-server is enabled or not'.
+                               format(str(response_output), ip))
+        self.sm.update_cur_state('fireos_state')
+        return ip
+
+    def check_settings_in_rommon(self, tftp_server, rommon_file, uut_ip, uut_netmask, uut_gateway):
+
+        expected_settings = ['ADDRESS={}'.format(uut_ip), 'NETMASK={}'.format(uut_netmask),
+                             'GATEWAY={}'.format(uut_gateway), 'SERVER={}'.format(tftp_server),
+                             'IMAGE={}'.format(rommon_file)]
+
+        current_settings = self.execute_only('set', 30)
+        if all([expected in [el.strip() for el in current_settings.split('\n\r')] for expected in expected_settings]):
+            logger.info('Environment variables were configured as expected')
+        else:
+            logger.error('Environment variables are NOT configured as expected')
+            raise RuntimeError('>>>>>> Environment variables are NOT configured as expected: \n {}'.
+                               format(current_settings))

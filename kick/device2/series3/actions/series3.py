@@ -782,7 +782,7 @@ image=/boot/{}
             files = docs
         else:
             server_ip, tftp_prefix, scp_prefix, files = prepare_installation_files(site, 's3', branch, version,
-                                                                               iso=iso_file_type, arch_type=arch)
+                                                                                   iso=iso_file_type, arch_type=arch)
         if not files[0]:
             raise Exception('Series3 iso file not found on server')
 

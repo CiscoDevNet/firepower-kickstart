@@ -13,6 +13,14 @@ def action_mio_to_fpr_module(spawn):
     spawn.sendline()
 
 
+def clear_error(spawn):
+    time.sleep(0.1)
+    spawn.sendline('\x15')
+    time.sleep(0.5)
+    spawn.sendline()
+    spawn.sendline()
+
+
 def ctrl_a_sleep_ctrl_d(spawn):
     spawn.send('\x01')
     time.sleep(0.5)
@@ -27,7 +35,7 @@ def ctrl_a_sleep_ctrl_d(spawn):
 class SspDialogs:
     """An SSP class that restores all dialogs for state trasitions."""
 
-    def __init__(self, patterns, deploy_type='native'):
+    def __init__(self, patterns):
         """Initializer of SspDialogs."""
 
         self.patterns = patterns
@@ -40,15 +48,13 @@ class SspDialogs:
 
         # from MIO to module boot cli
         self.d_mio_to_fpr_module = Dialog([
-            ['Close Network Connection to Exit', action_mio_to_fpr_module, None,
-             True, True],
-            [self.patterns.prompt.fireos_prompt, "sendline(exit)", None, True,
-             True],
-            [self.patterns.prompt.expert_cli, "sendline(exit)", None, True,
-             True],
-            [self.patterns.prompt.sudo_prompt, "sendline(exit)", None, True,
-             True],
-            [r'\x07', "sendline({})".format(chr(3)), None, True, True], ])
+            [r'\x07$', clear_error, None, True, True],
+            ['Close Network Connection to Exit', action_mio_to_fpr_module, None, True, True],
+            [self.patterns.prompt.fireos_prompt, "sendline(exit)", None, True, True],
+            [self.patterns.prompt.expert_cli, "sendline(exit)", None, True, True],
+            [self.patterns.prompt.sudo_prompt, "sendline(exit)", None, True, True],
+            [self.patterns.prompt.disable_prompt, "sendline(exit)", None, True, True],
+            [self.patterns.prompt.enable_prompt, "sendline(exit)", None, True, True]])
 
         # from module boot cli to FTD
         self.d_fpr_module_to_ftd = Dialog([

@@ -3,14 +3,22 @@
 SSP prompt patterns
 
 """
+import logging
+
 import munch
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class SspPatterns:
     """SSP class that restores all prompt patterns."""
-    def __init__(self, login_username, login_password, sudo_password, slot_id, app_hostname):
+    def __init__(self, hostname, login_username, login_password, sudo_password, slot_id, app_hostname,
+                 deploy_type='native', app_identifier=''):
         """Initializer of SspPatterns."""
 
+        self.dev_hostname = hostname
+        self.deploy_type = deploy_type
+        self.app_identifier = app_identifier
         self.login_username = login_username
         self.login_password = login_password
         self.sudo_password = sudo_password
@@ -42,3 +50,14 @@ class SspPatterns:
 
         # ASA level prompts
         self.prompt.asa_prompt = r'\r\nasa.*[>#]'
+
+        logger.info('\n\n\nPrompts are: {}\n\n\n'.format(self.prompt))
+
+    @property
+    def hostname(self):
+        return self.dev_hostname
+
+    @hostname.setter
+    def hostname(self, value):
+        self.dev_hostname = value
+
