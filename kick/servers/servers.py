@@ -125,7 +125,8 @@ def get_devices_dict(version, image=None, arch=None, feature=None):
                'boot_images': {'os/{}/boot'.format(arch): 'bzImage.*',
                                'os/{}/ramdisks'.format(arch): 'usb-ramdisk*'}
                },
-        'kp': {'patterns': ['cisco-ftd-fp2k[\d.-]+[a-zA-Z]{3}', 'fxos-k8-fp2k-lfbff[\w.-]+[a-zA-Z]{3}'],
+        'kp': {'patterns': ['cisco-ftd-fp2k[\d.-]+[a-zA-Z]{3}', 'fxos-k8-fp2k-lfbff[\w.-]+[a-zA-Z]{3}',
+                            'fxos-k8-lfbff[\w.-]+[a-zA-Z]{3}'],
                'subdir': ['installers', 'installers/doNotRelease'],
                },
         'ssp': {'patterns': ['cisco-ftd[\d.-]+[a-zA-Z]{3}.csp'],

@@ -44,6 +44,7 @@ DEFAULT = 'DEFAULT'
 EN_PASSWORD = 'en_password'
 DEFAULT_ENPASSWORD = 'myenpassword'
 
+
 class Ftd5500x(BasicDevice):
     def __init__(self, hostname='firepower', login_password='Admin123',
                  sudo_password='Admin123', enable_password='', *args, **kwargs):
@@ -179,7 +180,7 @@ class Ftd5500x(BasicDevice):
     def ssh_vty(self, ip, port, username='admin', password='Admin123',
                 timeout=None, line_type='ssh_vty', rsa_key=None):
         return super().ssh_vty(ip, port, username=username, password=password,
-                               timeout=timeout, line_type=line_type)
+                               timeout=timeout, line_type=line_type, rsa_key=rsa_key)
 
 
 class Ftd5500xLine(BasicLine):
@@ -321,7 +322,7 @@ class Ftd5500xLine(BasicLine):
             this_spawn.expect(exp_pattern, timeout=to)
             time.sleep(3)
 
-    def rommon_go_to(self, timeout=180):
+    def rommon_go_to(self, timeout=300):
         """Go to rommon mode.
 
         :return: None
@@ -330,8 +331,11 @@ class Ftd5500xLine(BasicLine):
 
         # break into rommon
         d1 = Dialog([
-            ['Use SPACE to begin boot immediately.',
-             'sendline({})'.format(chr(27)), None, False, False],
+            ['Use SPACE to begin boot immediately\.',
+             'sendline({})'.format(chr(27)), None, True, False],
+            ['Boot in \d+ seconds', 'sendline({})'.format(chr(27)), None,
+             True, False],
+            ['Boot interrupted\.', None, None, False, False]
         ])
         d1.process(self.spawn_id, timeout=timeout)
         time.sleep(10)
@@ -386,6 +390,7 @@ class Ftd5500xLine(BasicLine):
         self.spawn_id.sendline('tftpdnld')
         d1 = Dialog([
             ['rommon.*> ', 'sendline(tftpdnld)', None, True, False],
+            ['File not found', None, None, False, False],
             ['Use SPACE to launch Cisco FTD immediately.',
              'sendline({})'.format(chr(27)), None, True, False],
             ['-boot>', 'sendline()', None, False, False],
@@ -393,7 +398,7 @@ class Ftd5500xLine(BasicLine):
             [self.sm.patterns.prompt.disable_prompt, 'sendline()', None, False, False],
         ])
         try:
-            d1.process(self.spawn_id, timeout=timeout)
+            response = d1.process(self.spawn_id, timeout=timeout)
             self.spawn_id.sendline()
             logger.info("=== Rommon file was installed successfully.")
         except:
@@ -402,6 +407,8 @@ class Ftd5500xLine(BasicLine):
                 ">>>>>> Download failed. Please check details - "
                 "tftp_server: {}, image file: {}".format(self.rommon_tftp_server,
                                                          self.rommon_image))
+        if 'File not found' in response.match_output:
+            raise FileNotFoundError("TFTP error: File not found")
 
         logger.info('In boot CLI mode')
         logger.info("=== Rommon file was installed successfully.")
@@ -452,6 +459,14 @@ class Ftd5500xLine(BasicLine):
         ])
         d2.process(self.spawn_id, timeout=120)
 
+    def _last_match_index(self, match):
+        """
+        Makes the next, firepower_install easier to run unittest.
+        :param match:
+        :return:
+        """
+        return match.last_match_index
+
     def firepower_install(self):
         """Perform ping test and verify the network connectivity to TFTP server.
         Install FTD pkg image Enter device network info, hostname, and firewall
@@ -479,34 +494,55 @@ class Ftd5500xLine(BasicLine):
         ])
 
         d1 = Dialog([
-            ['Do you want to continue?', 'sendline(y)', None, True, False],
+            ['Do you want to continue\?', 'sendline(y)', None, True, False],
             ['Upgrade aborted', 'sendline()', None, False, False],
-            ['Installation aborted', 'sendline()', None, False, False]
+            ['Installation aborted', 'sendline()', None, False, False],
+            ['Package Detail', None, None, False, False]
         ])
         count = 0
         while count < self.retry_count:
-            try:
-                d0.process(self.spawn_id, timeout=20)
-                d1.process(self.spawn_id, timeout=60)
-                count += 1
-                time.sleep(5)
-            except:
+            d0.process(self.spawn_id, timeout=20)
+            match = d1.process(self.spawn_id, timeout=600)
+            if self._last_match_index(match) == 3:
                 break
-        assert count < self.retry_count, 'ftd installation failed' \
-            ', please check ftd package url: "{}"'.format(self.pkg_image)
+            count += 1
+            time.sleep(5)
+        else:  # didn't break out
+            raise RuntimeError('ftd installation failed, please check '
+                'ftd package url: "{}"'.format(self.pkg_image))
 
         d2 = Dialog([
-            ['Do you want to continue with upgrade?', 'sendline(y)', None,
-             True, True],
+            ['Do you want to continue with upgrade\?', 'sendline(y)', None,
+             False, False],
+        ])
+        # used to take 2 minutes
+        d2.process(self.spawn_id, timeout=1200)
+
+        # Handle the case "Press 'Enter' to reboot the system." was never displayed
+        # Script stuck if message above is not displayed but the device is waiting for 'enter'
+        count = 0
+        waittime = 60
+        total = 60 
+        d2_2 = Dialog([
             ["Press 'Enter' to reboot the system.", 'sendline()', None, True,
-             True],
+             False],
             ['Use SPACE to begin boot immediately.', 'send(" ")', None, True,
-             True],
+             False],
             ['Use SPACE to launch Cisco FTD immediately.', 'send(" ")', None,
-             True, True],
+             True, False],
             ['firepower login: ', 'sendline()', None, False, False],
         ])
-        d2.process(self.spawn_id, timeout=3900)
+
+        while count < total:
+            self.spawn_id.sendline()
+            try: 
+                d2_2.process(self.spawn_id, timeout=waittime)
+                break
+            except:
+                logger.info('=== Wait for firepower login: ({})'.format(count))
+                count += 1
+                time.sleep(5)
+                continue
 
         # Allow install processes to finish
         # Sleep was extended to 5 minutes as part of CSCvi89671
@@ -710,14 +746,14 @@ class Ftd5500xLine(BasicLine):
                     logger.info('Reboot the device ...')
                     self.go_to('sudo_state')
                     self.spawn_id.sendline('reboot')
+                    try:
+                        self.spawn_id.expect('Rebooting...', timeout=300)
+                    except TimeoutError:
+                        raise RuntimeError(">>>>>> Failed to reboot the device. Probably hanged during reboot?")
             else:
                 logger.info('Power cycle the device ...')
                 self.power_cycle(pdu_ip, pdu_port, wait_until_device_is_on=False, power_bar_user=pdu_user,
                                  power_bar_pwd=pdu_pwd)
-            try:
-                self.spawn_id.expect('Use (.*?BREAK.*?|.*?ESC.*?) to interrupt boot', timeout=120)
-            except TimeoutError:
-                RuntimeError(">>>>>> Failed to stop rebooting")
             logger.info('Drop the device to rommon.')
             self.rommon_go_to()
 
@@ -731,16 +767,17 @@ class Ftd5500xLine(BasicLine):
             d1.process(self.spawn_id, timeout=30)
             self.rommon_go_to()
 
-        if is_device_kenton:
-            logger.info('Device is Kenton. Rommon configure.')
-            self.rommon_configure()
-        else:
-            logger.info('Device is Saleen. Rommon configure.')
-            self.rommon_configure_saleen()
+        self.rommon_config(is_device_kenton)
 
         logger.info('tftpdnld - tftp server: {}, '
                     'rommon image: {} ...'.format(rommon_tftp_server, rommon_image))
-        self.rommon_boot(timeout=timeout)
+        try:
+            self.rommon_boot(timeout=timeout)
+        except FileNotFoundError:
+            logger.info('TFTP Error: File not found! Run again the network settings')
+            self.rommon_config(is_device_kenton)
+            self.rommon_boot(timeout=timeout)
+
         self.go_to('any')
         logger.info('firepower boot configure ...')
         self.firepower_boot_configure()
@@ -753,6 +790,14 @@ class Ftd5500xLine(BasicLine):
         logger.info('Validate version installed')
         self.validate_version()
         logger.info('Installation completed successfully.')
+
+    def rommon_config(self, is_device_kenton):
+        if is_device_kenton:
+            logger.info('Device is Kenton. Rommon configure.')
+            self.rommon_configure()
+        else:
+            logger.info('Device is Saleen. Rommon configure.')
+            self.rommon_configure_saleen()
 
     def enable_configure(self, timeout=20):
         """Used to enable configure terminal
@@ -949,13 +994,7 @@ class Ftd5500xLine(BasicLine):
 
         logger.info('==== Drop the device to rommon.')
         self.rommon_go_to()
-
-        if is_device_kenton:
-            logger.info('Device is Kenton. Rommon configure.')
-            self.rommon_configure()
-        else:
-            logger.info('Device is Saleen. Rommon configure.')
-            self.rommon_configure_saleen()
+        self.rommon_config(is_device_kenton)
 
         logger.info('tftpdnld - tftp server: {}, '
                     'rommon image: {} ...'.format(rommon_tftp_server, asa_image))

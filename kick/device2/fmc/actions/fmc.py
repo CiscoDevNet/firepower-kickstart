@@ -273,13 +273,15 @@ class FmcLine(BasicLine):
         :param change_password: Flag to change the password after baseline
         :return:
         """
-
-        # Configure network
+        #Configure network
+        try:
+            self.spawn_id.sendline('expert')
+        except:
+            pass
         self.spawn_id.sendline('sudo su -')
         self.spawn_id.expect("Password: ", 10)
         self.spawn_id.sendline(self.sm.patterns.default_password)
         self.go_to('any')
-
         self.spawn_id.sendline('configure-network')
         d5 = Dialog([
             ['Do you wish to configure IPv4', 'sendline({})'.format('y'),
@@ -347,12 +349,13 @@ class FmcLine(BasicLine):
                 logger.error('Changing password for {} user has failed'.format(self.sm.patterns.username))
                 raise Exception('Error while changing default password for {} user'.format(self.sm.patterns.username))
 
-    def validate_version(self, iso_file_name):
+    def validate_version(self, iso_file_name,private_iso=False):
         """Checks if the installed version matches the version from iso filename.
         Make sure you are in 'sudo_state' before calling this method.
 
         :param iso_file_name: iso filename under http_link,
                e.g. 'Sourcefire_Defense_Center_M4-6.2.0-362-Autotest.iso'
+        :param private_iso: Flag to validate version for private iso
         :return: None
 
         """
@@ -361,8 +364,12 @@ class FmcLine(BasicLine):
         version = self.execute('cat /etc/sf/ims.conf | egrep "SWVERSION"', 30)
         build = self.execute('cat /etc/sf/ims.conf | egrep "SWBUILD"', 30)
         # extract version and build from iso file name
-        expected_version = re.search('[\d.]+', iso_file_name.split('-')[-3]).group(0)
-        expected_build = re.search('\d+', iso_file_name.split('-')[-2]).group(0)
+        if private_iso:
+            expected_version = re.search('[\d.]+', iso_file_name.split('-')[-2]).group(0)
+            expected_build = re.search('\d+', iso_file_name.split('-')[-1]).group(0)
+        else:
+            expected_version = re.search('[\d.]+', iso_file_name.split('-')[-3]).group(0)
+            expected_build = re.search('\d+', iso_file_name.split('-')[-2]).group(0)
 
         if version.split('=')[1] == expected_version and build.split('=')[1] == expected_build:
             logger.info('>>>>>> Version {}, Build {} match {} {}'.format(version.split('=')[1],
@@ -574,7 +581,6 @@ class FmcLine(BasicLine):
             elif 'Password:' in res.match_output:
                 logger.info("Install is done and got firepower login: prompt")
                 self._first_login()
-                self.spawn_id.sendline()
                 return 0
 
         logger.error("Unknown state. It should never be here")
@@ -591,31 +597,37 @@ class FmcLine(BasicLine):
         d0 = Dialog([
             ['\(current\) UNIX password', 'sendline({})'.format(self.sm.patterns.default_password), None, True, False],
             ['New UNIX password', 'sendline({})'.format(self.sm.patterns.login_password), None, True, False],
-            ['Retype new UNIX password', 'sendline({})'.format(self.sm.patterns.login_password), None, False, False]
+            ['Retype new UNIX password', 'sendline({})'.format(self.sm.patterns.login_password), None, False, False],
+            ['Press <ENTER> to display the EULA: ', 'sendline()', None, True, False],
+            ['--More--', 'send(\x20)', None, True, False],
+            ["Please enter 'YES' or press <ENTER> to AGREE to the EULA: ", 'sendline()', None, False, False],
                 ])
 
         accept_eula_dialog = Dialog([
             ['Press <ENTER> to display the EULA: ', 'sendline()', None, True, False],
-            ['--More--', 'send(q)', None, False, False],
+            ['--More--', 'send(\x20)', None, True, False],
             ["Please enter 'YES' or press <ENTER> to AGREE to the EULA: ", 'sendline()', None, False, False],
+            ['Enter new password', 'sendline({})'.format(self.sm.patterns.login_password), None, True, False],
+            ['Confirm new password', 'sendline({})'.format(self.sm.patterns.login_password), None, False, False],
         ])
         try:
-            d0.process(self.spawn_id, timeout=30)
+            d0.process(self.spawn_id, timeout=90)
             try:
-                accept_eula_dialog.process(self.spawn_id, timeout=60)
+                accept_eula_dialog.process(self.spawn_id, timeout=90)
             except TimeoutError:
                 logger.info("=== EULA was not displayed")
             logger.info("=== Successfully completed the first login for fmc")
         except TimeoutError:
             logger.warning('Changing password for {} user was not required at this step'.
                            format(self.sm.patterns.login_username))
+            self.spawn_id.sendline()
 
     def configuration_wizard(self, ipv4_mode, ipv6_mode, ipv4, ipv4_netmask, ipv4_gateway,
                              ipv6, ipv6_prefix, ipv6_gateway, dns_servers, search_domains,
                              ntp_servers):
         """ Handle FMC configuration wizard
 
-        :param ipv4_mode: IPv4 configuration mode - 'static' or 'dhcp'
+        :param ipv4_mode: IPv4 configuration mode - 'static' ('manual') or 'dhcp'
         :param ipv4: IPv4 address of the management interface
         :param ipv4_netmask: IPv4 netmask of the management interface
         :param ipv4_gateway: IPv4 gateway of the management interface
@@ -628,14 +640,24 @@ class FmcLine(BasicLine):
         :param ntp_servers: a comma-separated string of NTP servers
         :return: True if network configuration was done, False otherwise
         """
+        if ipv4_mode in ["static", "manual"]:
+            ipv4_mode_new = "manual"
+            ipv4_mode_old = "static"
+        else:
+            ipv4_mode_old = "dhcp"
+            ipv4_mode_new = "dhcp"
 
         config_dialog = Dialog([
             [self.sm.patterns.prompt.fireos_prompt, 'sendline()', None, False, False],
             [self.sm.patterns.prompt.admin_prompt, 'sendline()', None, False, False],
             [self.sm.patterns.prompt.sudo_prompt, 'sendline()', None, False, False],
+            ['Enter a hostname or fully qualified domain name for this system ',
+             'sendline({})'.format(self.sm.patterns.fqdn), None, True, False],
             ['Enter a fully qualified hostname for this system ',
              'sendline({})'.format(self.sm.patterns.fqdn), None, True, False],
-            ['Configure IPv4 via DHCP or static configuration', 'sendline({})'.format(ipv4_mode),
+            ['Configure IPv4 via DHCP or manually', 'sendline({})'.format(ipv4_mode_new),
+             None, True, False],
+            ['Configure IPv4 via DHCP or static configuration', 'sendline({})'.format(ipv4_mode_old),
              None, True, False],
         ])
 
@@ -667,6 +689,7 @@ class FmcLine(BasicLine):
                               None, True, False])
         config_dialog.append(['Enter a comma-separated list of NTP servers', 'sendline({})'.format(ntp_servers),
                               None, True, False])
+        config_dialog.append(['Are these settings correct', 'sendline(y)', None, True, False])
         config_dialog.append(['Updated network configuration', None, None, True, False])
 
         response = config_dialog.process(self.spawn_id, timeout=900)

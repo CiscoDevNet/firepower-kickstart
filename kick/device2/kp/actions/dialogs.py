@@ -12,8 +12,5 @@ class KpDialogs:
                                          None, True, True], ])
         self.d_ftd_to_fxos = Dialog([
             ["Please enter 'exit' to go back", 'sendline(exit)', None, True, False], ])
-        self.d_prelogin_to_fxos = Dialog([[self.patterns.prompt.password_prompt,
-                                           'sendline({})'.format(self.patterns.login_password),
-                                           None, True, True], ])
-        
+
         self.ftd_dialogs = Ftd5500xDialog(patterns)

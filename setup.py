@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
       name='firepower-kickstart',
-      version='0.1.0',
+      version='0.2.0',
       author="Cisco Systems Inc.",
       author_email="firepower-kickstart-support-ext@cisco.com",
       description="Python modules to install Firepower Threat Defense images (FTD) on hardware platforms.",

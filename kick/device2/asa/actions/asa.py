@@ -283,7 +283,7 @@ class AsaLine(BasicLine):
         else:
             raise RuntimeError('Unable to determine current firewall mode')
 
-    def change_context_mode(self, cmode):
+    def change_context_mode(self, cmode, timeout=300):
         """Change context mode between single and multi
 
         :param cmode: context mode. sfm | mfm
@@ -314,7 +314,7 @@ class AsaLine(BasicLine):
             else:
                 self.spawn_id.sendline()
 
-            self._reload_expect_prompt()
+            self._reload_expect_prompt(timeout=timeout)
 
             self.config(ASA_INIT_CMDS)
 
@@ -368,29 +368,33 @@ class AsaLine(BasicLine):
         :return: None
 
         """
-
-        if self.type == 'ssh':
-            # send \n + ~.
-            self.spawn_id.sendline('')
-            self.spawn_id.send('~.')
-            self.spawn_id.expect('Connection to .* closed.')
-        elif self.type == 'telnet':
-            if self.carrier in ('ssp', 'kp'):
-                # pylint: disable=anomalous-backslash-in-string
-                self.spawn_id.send('\001')
-                self.spawn_id.send('d')
-                if self.carrier == 'ssp':
-                    self.spawn_id.expect('Firepower-module\d+>')
-                    self.spawn_id.send('~')
-                    self.spawn_id.expect('telnet>')
-                    self.spawn_id.sendline('quit')
+        if self.spawn_id is not None:
+            if self.type == 'ssh':
+                # send \n + ~.
+                self.spawn_id.sendline('')
+                self.spawn_id.send('~.')
+                self.spawn_id.expect('Connection to .* closed.')
+            elif self.type == 'telnet':
+                if self.carrier in ('ssp', 'kp'):
+                    # pylint: disable=anomalous-backslash-in-string
+                    self.spawn_id.send('\001')
+                    self.spawn_id.send('d')
+                    if self.carrier == 'ssp':
+                        self.spawn_id.expect('Firepower-module\d+>')
+                        self.spawn_id.send('~')
+                        self.spawn_id.expect('telnet>')
+                        self.spawn_id.sendline('quit')
+                        self.spawn_id.expect('Connection closed.')
+                else:
+                    # send ctrl + ], then q
+                    self.spawn_id.send('\035')
+                    self.spawn_id.expect('telnet> ')
+                    self.spawn_id.sendline('q')
                     self.spawn_id.expect('Connection closed.')
-            else:
-                # send ctrl + ], then q
-                self.spawn_id.send('\035')
-                self.spawn_id.expect('telnet> ')
-                self.spawn_id.sendline('q')
-                self.spawn_id.expect('Connection closed.')
+            self.spawn_id.close()
+        else:
+            LOGGER.info('You have already closed the connection to this device previously.')
+        self.spawn_id = None
 
     def _reload_expect_prompt(self, timeout=300):
         """Wait for ASA to be back online after reload

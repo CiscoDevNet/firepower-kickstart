@@ -28,6 +28,7 @@ except ImportError:
     pass
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 ChassisInitCmds = '''
     top
@@ -528,7 +529,7 @@ class ChassisLine(BasicLine):
         output = self.execute_lines(cmd_lines, timeout=60)
 
         LogicalDevice = collections.namedtuple('LogicalDevice', [
-            'name', 'slot_id', 'mode', 'operational_state', 'template_name'])
+            'name', 'slot_id', 'mode', 'operational_state', 'template_name', 'error_msg'])
         logical_device_list = []
 
         for line in output.split('\n'):
@@ -557,11 +558,15 @@ class ChassisLine(BasicLine):
                     continue
             if a_name == 'Template Name':
                 vtemp = a_value
+                continue
+            if a_name == "Error Msg":
+                verr_msg = a_value
                 logical_device = LogicalDevice(name=vname,
                                                slot_id=vslot,
                                                mode=vmode,
                                                operational_state=voper,
-                                               template_name=vtemp)
+                                               template_name=vtemp,
+                                               error_msg=verr_msg)
                 logical_device_list.append(logical_device)
                 logger.info(str(logical_device_list))
                 continue
@@ -1227,6 +1232,7 @@ class ChassisLine(BasicLine):
 
             enter mgmt-bootstrap ftd
         """
+
         for bs_key in lg_data.get('bootstrap_keys', []):
             lg_config += """
                 create bootstrap-key {}
@@ -1241,19 +1247,26 @@ class ChassisLine(BasicLine):
                 enter ipv4 {} firepower
                 set ip {} mask {}
                 set gateway {}
+                exit
             """.format(
             str(slot),
             lg_data['ipv4']['ip'],
             lg_data['ipv4']['netmask'],
             lg_data['ipv4']['gateway'])
-
-        lg_config += """
-            commit-buffer
-        """
         self.execute_lines(lg_config, exception_on_bad_command=True)
+
+        if lg_data.get('bootstrap_keys_secret', None):
+            for bs_secret_key, value in lg_data['bootstrap_keys_secret'].items():
+                self.execute_lines("enter bootstrap-key-secret {}".format(bs_secret_key.upper()))
+                self.set_value(value)
+                self.execute_lines("exit")
+
+        self.execute_lines("""commit-buffer""", exception_on_bad_command=True)
 
         self.wait_till(self.is_logical_device_created, (lg_data['name'],),
                        wait_upto=wait_upto)
+
+        self.check_all_logical_devices_configuration()
 
     def is_logical_device_created(self, lg_name):
         """
@@ -1511,7 +1524,162 @@ class ChassisLine(BasicLine):
                                    timeout=30)
         self.execute('commit-buffer', timeout=10,
                      exception_on_bad_command=True)
-        output = self.execute_lines(cmd_lines, timeout=60)
+        self.execute_lines(cmd_lines, timeout=60)
+
+    def assign_all_aggr_interfaces_to_data_type(self):
+        """
+        Deletes all subinterfaces defined on the interfaces inside the aggregate interfaces present on the device.
+        After this it resets all aggr interfaces to the data type.
+        :return:
+        """
+        aggr_ifaces = self.get_aggr_interfaces_list()
+        # delete subinterfaces
+        for aggr_iface in aggr_ifaces:
+            for iface in aggr_iface.InterfacesList:
+                for subiface in iface.SubInterfacesList:
+                    logger.info('Deleting aggregate interface subinterface {}.{}'.format(
+                        iface.PortName, subiface.SubInterfaceId))
+                    cmd_lines = """
+                        top
+                        scope eth-uplink
+                        scope fabric a
+                        enter aggr-interface {}
+                    """.format(aggr_iface.PortName)
+                    self.go_to('mio_state')
+                    self.execute_lines(cmd_lines, timeout=60, exception_on_bad_command=True)
+                    cmd_lines = """enter interface {}""".format(iface.PortName)
+                    self.execute_lines(cmd_lines, timeout=60, exception_on_bad_command=True)
+                    cmd_lines = """delete subinterface {}""".format(subiface.SubInterfaceId)
+                    self.execute_lines(cmd_lines, timeout=60, exception_on_bad_command=True)
+                    self.execute_lines("""commit-buffer""", timeout=60, exception_on_bad_command=True)
+                    self.execute_lines("""exit""", timeout=60, exception_on_bad_command=True)
+
+        # reset interfaces
+        for aggr_iface in aggr_ifaces:
+            cmd_lines = """
+                top
+                scope eth-uplink
+                scope fabric a
+                enter aggr-interface {}
+            """.format(aggr_iface.PortName)
+            self.go_to('mio_state')
+            self.execute_lines(cmd_lines, timeout=60, exception_on_bad_command=True)
+            for iface in aggr_iface.InterfacesList:
+                logger.info('Reseting aggregate interface {} to data type'.format(aggr_iface.PortName))
+                cmd_lines = """enter interface {}""".format(iface.PortName)
+                self.execute_lines(cmd_lines, timeout=60, exception_on_bad_command=True)
+                self.execute_lines("""set port-type data""", timeout=60, exception_on_bad_command=True)
+                self.execute_lines("""commit-buffer""", timeout=60, exception_on_bad_command=True)
+                self.execute_lines("""exit""", timeout=60, exception_on_bad_command=True)
+        return aggr_ifaces
+
+    def get_aggr_interfaces_list(self):
+        """
+        Get list of aggregate interfaces
+        :return: List of aggregate interfaces instances
+        """
+        logger.info('Reading existing aggregate interfaces from device ...')
+        cmd_lines = """
+            top
+            scope eth-uplink
+            scope fabric a
+            show aggr-interface detail
+        """
+        self.go_to('mio_state')
+        output = self.execute_lines(cmd_lines, timeout=60, exception_on_bad_command=True)
+
+        AggrInterface = collections.namedtuple('AggrInterface', ['PortName', 'ConfigState', 'InterfacesList'])
+        Interface = collections.namedtuple('Interface', ['PortName', 'PortType', 'SubInterfacesList'])
+        SubInterface = collections.namedtuple('SubInterface', ['SubInterfaceId', 'SubInterfaceName', 'PortType'])
+        aggr_ifaces = []
+
+        for line in output.split('\n'):
+            line = line.strip()
+            if line == '':
+                continue
+            logger.debug('line=' + line)
+            if line.find(':') == -1:
+                continue
+            name_value = line.split(':')
+            a_name = name_value[0].strip()
+            a_value = name_value[1].strip()
+            if a_name.startswith('Port Name'):
+                port_name = a_value
+                continue
+            if a_name.startswith('Config State'):
+                config_state = a_value
+                aggr_ifaces.append(AggrInterface(port_name, config_state, list()))
+                continue
+
+        for aggr_iface in aggr_ifaces:
+            cmd_lines = """
+                top
+                scope eth-uplink
+                scope fabric a
+                enter aggr-interface {}
+                show interface detail
+            """.format(aggr_iface.PortName)
+            self.go_to('mio_state')
+            output = self.execute_lines(cmd_lines, timeout=60, exception_on_bad_command=True)
+
+            for line in output.split('\n'):
+                line = line.strip()
+                if line == '':
+                    continue
+                logger.debug('line=' + line)
+                if line.find(':') == -1:
+                    continue
+                name_value = line.split(':')
+                a_name = name_value[0].strip()
+                a_value = name_value[1].strip()
+                if a_name.startswith('Port Name'):
+                    port_name = a_value
+                    continue
+                if a_name.startswith('Port Type'):
+                    port_type = a_value
+                    aggr_iface.InterfacesList.append(Interface(port_name, port_type, list()))
+                    continue
+
+        for aggr_iface in aggr_ifaces:
+            cmd_lines = """
+                top
+                scope eth-uplink
+                scope fabric a
+                enter aggr-interface {}
+            """.format(aggr_iface.PortName)
+            self.go_to('mio_state')
+            self.execute_lines(cmd_lines, timeout=60, exception_on_bad_command=True)
+            for iface in aggr_iface.InterfacesList:
+                cmd_lines = """
+                    enter interface {}
+                    show subinterface detail
+                    exit
+                """.format(iface.PortName)
+                self.go_to('mio_state')
+                output = self.execute_lines(cmd_lines, timeout=60, exception_on_bad_command=True)
+
+                for line in output.split('\n'):
+                    line = line.strip()
+                    if line == '':
+                        continue
+                    logger.debug('line=' + line)
+                    if line.find(':') == -1:
+                        continue
+                    name_value = line.split(':')
+                    a_name = name_value[0].strip()
+                    a_value = name_value[1].strip()
+                    if a_name.startswith('Sub-If Id'):
+                        subiface_id = a_value
+                        continue
+                    if a_name.startswith('Sub-Interface Name'):
+                        port_name = a_value
+                        continue
+                    if a_name.startswith('Port Type'):
+                        port_type = a_value
+                        iface.SubInterfacesList.append(SubInterface(subiface_id, port_name, port_type))
+                        continue
+        logger.info('Discovered aggregate interfaces on device: {}'.format(aggr_ifaces))
+        return aggr_ifaces
 
     def is_firmware_monitor_ready(self, version):
         """Check whether the bundle package is installed successfully.
@@ -1880,8 +2048,9 @@ class ChassisLine(BasicLine):
 
     def disconnect(self):
         """Disconnect the Device."""
-        if self.type == 'ssh':
-            self.go_to('mio_state')
+        if self.spawn_id is not None:
+            if self.type == 'ssh':
+                self.go_to('mio_state')
         super().disconnect()
 
     def is_app_instance_ready(self, slot_id, application_name,
@@ -2074,7 +2243,7 @@ class ChassisLine(BasicLine):
                 check_format_done in slot_status) or \
                 check_failed_operational in slot_status
 
-    def reinitialize_slots(self, slot_ids, timeout=600):
+    def reinitialize_slots(self, slot_ids, timeout=900):
         """
         Starts the reinitializing of the slot
 
@@ -2177,6 +2346,51 @@ class ChassisLine(BasicLine):
             """.format(chassis_network_config))
             self.execute_lines(chassis_network_config)
 
+    def configure_aggr_interface(self, aggr_interface):
+        """
+        Configure an aggregate interface on the chassis
+        :param aggr_interface: a dict describing the interface information (see testbed format for details)
+        """
+        logger.info('Configuring aggregate interface {}'.format(aggr_interface.hardware))
+        aggr_interface_config = """
+            top
+            scope eth-uplink
+            scope fabric a
+            scope aggr-interface {}
+            scope interface {}
+            set port-type {}
+            enable
+            exit
+            commit-buffer
+        """.format(re.search('Ethernet\d+/\d+', aggr_interface.hardware).group(0),
+                   aggr_interface.hardware,
+                   aggr_interface.subtype)
+        self.execute_lines(aggr_interface_config, exception_on_bad_command=True)
+
+        if hasattr(aggr_interface, 'subinterfaces') and isinstance(
+                aggr_interface.subinterfaces, list):
+            for subinterface in aggr_interface.subinterfaces:
+                logger.info('Configuring aggregate interface subinterface {}.{}'.format(
+                    aggr_interface.hardware, subinterface['id']))
+                subinterface_config = """
+                    top
+                    scope eth-uplink
+                    scope fabric a
+                    scope aggr-interface {}
+                    scope interface {}
+                    create subinterface {}
+                    set vlan {}
+                    set port-type {}
+                    exit
+                    commit-buffer
+                """.format(re.search('Ethernet\d+/\d+', aggr_interface.hardware).group(0),
+                           aggr_interface.hardware,
+                           str(subinterface['id']),
+                           str(subinterface['vlan_id']),
+                           str(subinterface.get('subtype', 'data')))
+                self.execute_lines(subinterface_config,
+                                   exception_on_bad_command=False)
+
     def configure_interface(self, interface):
         """
         Configure an interface on the chassis
@@ -2245,10 +2459,20 @@ class ChassisLine(BasicLine):
         interfaces = [chassis_network_data['interfaces'][iface]
                       for iface in chassis_network_data['interfaces']
                       if 'chassis_mgmt' not in iface and chassis_network_data[
-                          'interfaces'][iface].type == 'Ethernet']
+                          'interfaces'][iface].type == 'Ethernet' and
+                      re.match('^Ethernet\d+/\d+$', chassis_network_data['interfaces'][iface].hardware.strip())]
 
         for iface in interfaces:
             self.configure_interface(iface)
+
+        aggr_interfaces = [chassis_network_data['interfaces'][iface]
+                           for iface in chassis_network_data['interfaces']
+                           if 'chassis_mgmt' not in iface and chassis_network_data[
+                               'interfaces'][iface].type == 'Ethernet' and
+                           re.match('^Ethernet\d+/\d+/\d+$', chassis_network_data['interfaces'][
+                               iface].hardware.strip())]
+        for aggr_iface in aggr_interfaces:
+            self.configure_aggr_interface(aggr_iface)
 
     def delete_all_resource_profiles(self):
         """
@@ -2331,16 +2555,17 @@ class ChassisLine(BasicLine):
         for app_version in app_versions:
             self.accept_application_license_agreement(app_version)
 
-    def _get_interface_object_from_chassis_data(
-            self, external_port_link, chassis_network):
+    def _get_interface_object_from_chassis_data(self, external_port_link, chassis_network):
         interface_object = None
         chassis_interfaces = chassis_network['interfaces']
         is_port_interface = re.match(
-            'Ethernet\d+/\d+', external_port_link, re.IGNORECASE)
+            '^Ethernet\d+/\d+$', external_port_link, re.IGNORECASE)
         is_port_subinterface = re.match(
-            'Ethernet\d+/\d+\.\d+', external_port_link, re.IGNORECASE)
+            '^Ethernet\d+/\d+\.\d+$', external_port_link, re.IGNORECASE)
         is_port_portchannel = re.match(
             'Port-channel\d+', external_port_link, re.IGNORECASE)
+        is_port_aggr_interface = re.match('^Ethernet\d+/\d+/\d+$', external_port_link, re.IGNORECASE)
+        is_port_aggr_subinterface = re.match('^Ethernet\d+/\d+/\d+.\d+$', external_port_link, re.IGNORECASE)
         for intf in chassis_interfaces:
             if 'chassis_mgmt' not in intf:
                 iface = chassis_interfaces[intf]
@@ -2363,7 +2588,31 @@ class ChassisLine(BasicLine):
                                  external_port_link, re.IGNORECASE):
                     interface_object = iface
                     break
+                if is_port_aggr_interface and iface.type.lower().startswith('ethernet') and \
+                        iface.hardware == external_port_link:
+                    interface_object = iface
+                    break
+                if is_port_aggr_subinterface and iface.type.lower().startswith('ethernet'):
+                    if hasattr(iface, 'subinterfaces'):
+                        subiface_ids = [iface.hardware + '.' +
+                                        str(s['id'])
+                                        for s in iface.subinterfaces]
+                        if external_port_link in subiface_ids:
+                            interface_object = iface
+                            break
         return interface_object
+
+    def check_all_logical_devices_configuration(self):
+        """
+        Method checks if one of the logical devices is configured improperly
+        """
+        logger.info('Checking logical device for reported configuration errors...')
+        # wait for logical device to report any errors
+        time.sleep(10)
+        for ld in self.get_logical_device_list():
+            if 'incomplete' in ld.operational_state.lower():
+                raise RuntimeError('Incomplete configuration of logical device: {}. Error Msg: {}'.format(
+                ld.name, ld.error_msg))
 
     def configure_logical_devices_standalone(self, chassis_data):
         """
@@ -2641,6 +2890,11 @@ class ChassisLine(BasicLine):
         self.execute_lines(logical_device_config, timeout=60,
                            exception_on_bad_command=True)
 
+        self.wait_till(self.is_logical_device_created, (logical_device_name, ),
+                       wait_upto=60)
+
+        self.check_all_logical_devices_configuration()
+
     def get_user_provided_slot_list(self, chassis_data):
         """
         Method gets the user provided slot list inside the testbed.
@@ -2737,7 +2991,30 @@ class ChassisLine(BasicLine):
                 self.set_current_slot(slot_id)
                 self.set_current_application(app_identifier)
                 # wait up to 10 minutes for the ftd to be initialized
-                self.go_to('fireos_state', timeout=600)
+                try:
+                    self.go_to('fireos_state', timeout=600)
+                except StateMachineError as e:
+                    # the below can happen on slow devices where the password is sent to the device but for
+                    # some reason after showing the initial configuration prompt and going into fireos
+                    # the device echoes back the password in the fireos buffer. This causes a state machine exception
+                    # because the buffer is poluted with the password like so: '> Admin123!' although everything is
+                    # good and we need to only clean the prompt which is handled below
+                    self.spawn_id.read_update_buffer()
+                    logger.info('Encountered exception: {}'.format(str(e)))
+                    logger.info('spawn_id buffer is: {}'.format(self.spawn_id.buffer))
+                    try:
+                        self.spawn_id.buffer = ''
+                        self.spawn_id.sendline('\x15')
+                        self.spawn_id.sendline()
+                        d = Dialog([['> ', 'sendline()', None, False, False]])
+                        d.process(self.spawn_id, timeout=10)
+                        self.sm.update_cur_state(self.sm.get_state('fireos_state'))
+                    except Exception as e:
+                        # the above should not fail because it causes the next devices to skip the
+                        # initial configuration. It should only report an error.
+                        logger.info('Encountered exception while trying to clean fireos prompt. '
+                                    'Exception is: {}'.format(str(e)))
+
                 logger.info('Password changed on FTD {} from slot '
                             '{}'.format(app_identifier, slot_id))
                 self.go_to('mio_state', timeout=360)
@@ -2874,6 +3151,7 @@ class ChassisLine(BasicLine):
         reset_interfaces_to_data_type = options.get(
             'reset_interfaces_to_data_type', True)
         cleanup_subinterfaces = options.get('cleanup_subinterfaces', True)
+        cleanup_aggr_interfaces = options.get('cleanup_aggregate_interfaces', True)
         cleanup_port_channels = options.get('cleanup_port_channels', True)
         cleanup_resource_profiles = options.get(
             'cleanup_resource_profiles', True)
@@ -2886,6 +3164,8 @@ class ChassisLine(BasicLine):
             self.delete_all_subinterfaces()
         if reset_interfaces_to_data_type:
             self.assign_all_interfaces_to_data_type()
+        if cleanup_aggr_interfaces:
+            self.assign_all_aggr_interfaces_to_data_type()
         if cleanup_resource_profiles:
             self.delete_all_resource_profiles()
 
@@ -2980,13 +3260,14 @@ class ChassisLine(BasicLine):
         is_sw_on_device = self.is_fxos_image_on_device(fxos_url) and \
                           self.is_app_image_on_device(
                               version.lower().replace('-', '.').strip())
+        server_password = None
         if not is_sw_on_device:
             if KICK_EXTERNAL:
                 server_ip = serverIp
                 tftp_prefix = tftpPrefix
                 scp_prefix = scpPrefix
                 files = docs
-                pxe_password = pxePassword
+                server_password = pxePassword
                 scp_fxos_link = 'scp://pxe@{}:{}/{}'.format(server_ip, fxosDir, fxos_file)
             else:
                 server_ip, tftp_prefix, scp_prefix, files = \
@@ -2995,6 +3276,7 @@ class ChassisLine(BasicLine):
                 scp_fxos_link = 'scp://pxe@{}:{}/{}'.format(server_ip,
                                                             pxe_dir['fxos_dir'],
                                                             fxos_file)
+                server_password = pxe_password
             csp_file = [file for file in files if file.endswith('.csp')][0]
             scp_csp_link = "scp://pxe@{}:/{}/{}".format(server_ip, scp_prefix,
                                                         csp_file)
@@ -3006,7 +3288,7 @@ class ChassisLine(BasicLine):
 
         self.baseline_fxos_and_apps(
             fxos_url=scp_fxos_link, csp_urls=[scp_csp_link],
-            scp_password=pxe_password, http_url='', chassis_data=chassis_data,
+            scp_password=server_password, http_url='', chassis_data=chassis_data,
             wait_for_app_to_start=wait_for_app_to_start)
 
     def baseline(self, chassis_data, wait_for_app_to_start=3600):
@@ -3150,3 +3432,5 @@ class ChassisLine(BasicLine):
         self.wait_for_baseline_app_creation(chassis_data, wait_for_app_to_start)
 
         self.do_extra_checks_after_baseline(chassis_data)
+
+        logger.info('Baseline finished successfully.')

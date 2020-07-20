@@ -1,17 +1,19 @@
+import logging
+import re
+import subprocess
+import time
+import traceback
+
+import datetime
+from unicon.core.errors import StateMachineError
 from unicon.eal.dialogs import Dialog
+from unicon.eal.expect import TimeoutError as uniconTimeoutError
 from unicon.statemachine import Path
 from unicon.statemachine import State
 from unicon.utils import AttributeDict
-from unicon.eal.expect import Spawn, TimeoutError
-from ..actions.access import clear_line
-from kick.miscellaneous.credentials import *
-import subprocess
 
-import re
-import time
-import logging
-import datetime
-import traceback
+from kick.miscellaneous.credentials import *
+from ..actions.access import clear_line
 
 try:
     import kick.graphite.graphite as graphite
@@ -31,17 +33,20 @@ try:
 except ImportError:
     from kick.miscellaneous.credentials import KickConsts
 
-from .constants import CONFIGURATION_DIALOG, TYPE_TO_STATE_MAP
+from .constants import CONFIGURATION_DIALOG, TYPE_TO_STATE_MAP, DEVICE_LIST
 
 DEFAULT_USERNAME = 'myusername'
 DEFAULT_PASSWORD = 'mypassword'
 DEFAULT_ENPASSWORD = 'myenpassword'
+
 
 class NewSpawn(pty_backend.Spawn):
     """A new Spawn class that ignore non utf-8 decode error."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if hasattr(self, 'match_mode_detect'):
+            self.match_mode_detect = False
 
     def read(self, size=None):
         """Override original read function to ignore non utf-8 decode error."""
@@ -260,7 +265,7 @@ class BasicDevice:
         spawn_id.sendline(password)
         try:
             spawn_id.expect("Password OK.*", timeout)
-        except TimeoutError:
+        except uniconTimeoutError:
             logger.debug("'Password OK' message did not appear ... continue")
         spawn_id.sendline('')
         telnet_line = self.line_class(spawn_id, self.sm, 'telnet',
@@ -346,14 +351,24 @@ class BasicDevice:
         d = Dialog([
             ['continue connecting (yes/no)?', 'sendline(yes)', None, True,
              False],
-            ['(p|P)assword:', 'sendline_ctx(password)', None, False, False]
+            ['(p|P)assword:', 'sendline_ctx(password)', None, False, False],
+            ['[>#$] ', 'sendline()', None, False, False]
         ])
 
+        output = d.process(spawn_id, context=ctx, timeout=timeout)
+        logger.info('Output from login dialog is: {}'.format(output.match_output.replace(
+            '\n', '[LF]').replace('\r', '[CR]')))
         try:
-            d.process(spawn_id, context=ctx, timeout=timeout)
             ssh_line = self._accept_configuration_and_change_password(spawn_id, line_type, username, password, timeout)
+        except TimeoutError:
+            logger.info("Device initialization has failed")
+            logger.info('Spawn_id.buffer content is: {}'.format(spawn_id.buffer))
+            raise
         except OSError:
-            logger.info("Failed to login with user provided password: {}".format(password))
+            logger.info(
+                "Failed to login with user provided details: user: {}, password: {}".format(
+                    username, password))
+            raise
 
         logger.debug('ssh_vty() finished successfully')
 
@@ -453,7 +468,7 @@ class BasicDevice:
             logger.error('ssh not available after {} '.format(_time_message(start_time, end_time)))
             raise RuntimeError('ssh connection not available')
         return is_available
-        
+
     def _accept_configuration_and_change_password(self, spawn_id, line_type, username, password, timeout):
         """ Confirm device properties and change password to a dummy one and then back to the one provided by
         the user
@@ -465,10 +480,12 @@ class BasicDevice:
         :return:
         """
         ssh_line = None
-
         d_change_password = Dialog([
+            ['Too many logins for \'{}\''.format(username), None, None, False, False],
             ['Password OK', 'sendline()', None, False, False],
-            ['[.*># $] ', 'sendline()', None, False, False],
+            ['[>#$] ', 'sendline()', None, False, False],
+            ['Last login: ', None, None, False, False],
+            ['Password:', 'sendline({})'.format(password), None, True, False],
             ['You are required to change your password immediately', None, None, True, False],
             ['\(current\) UNIX password', 'sendline({})'.format(password), None, True, False],
             ['New UNIX password', 'sendline({})'.format(KickConsts.DUMMY_PASSWORD), None, True, False],
@@ -476,22 +493,58 @@ class BasicDevice:
             ['Password unchanged', None, None, False, False]
         ])
 
-        response = d_change_password.process(spawn_id, timeout=60)
+        response = d_change_password.process(spawn_id, timeout=150)
+        logger.info("response of d_change_password is: {}".format(response.match_output))
 
         if response and 'Password unchanged' in response.match_output:
             logger.error('Changing password for {} user has failed'.format(username))
             spawn_id.close()
             raise Exception('Error while changing {} password to the temporary one'.format(username))
 
-        CONFIGURATION_DIALOG.process(spawn_id, timeout=300)
+        if 'Too many logins for \'{}\''.format(username) in response.match_output:
+            logger.info('Too many logins for \'{}\''.format(username) )
+            spawn_id.close()
+            raise Exception('Error while taking ssh connection for {} as the user has taken maximum connections'.format(username))
+
+        config_dialog = CONFIGURATION_DIALOG.process(spawn_id, timeout=900)
+        # get hostname dynamically and reinitialize the state machines
+        self.reinitialize_sm(spawn_id, config_dialog)
 
         if response and 'You are required to change your password immediately' in response.match_output:
-            logger.info("Change back dummy password: '{}' to the one provided by the user".
+            logger.info("Change back dummy password: '{}' to the one provided by the user.".
                         format(KickConsts.DUMMY_PASSWORD))
             ssh_line = self.line_class(spawn_id, self.sm, line_type, timeout=timeout)
             _set_password(ssh_line, username, password)
 
         return ssh_line
+
+    def reinitialize_sm(self, spawn_id, response_dialog):
+        if str(self.line_class) in DEVICE_LIST:
+            logger.debug("Reinitialize state machines")
+            self.sm.patterns.hostname = self._get_hostname(spawn_id) or self.sm.patterns.hostname
+            self.sm.__init__(self.sm.patterns)
+            if response_dialog and '> ' in response_dialog.match_output:
+                spawn_id.sendline('exit')
+        else:
+            logger.debug("{} not qualified for reinitialize sm".format(self.line_class))
+
+    def _get_hostname(self, spawn_id):
+        """Get hostname dynamically"""
+
+        # clear buffer first
+        spawn_id.buffer = ''
+        # send new line to get the prompt
+        spawn_id.sendline()
+        time.sleep(3)
+        prompt = spawn_id.read()
+        regex_pattern = "[\w-]*((?=\slogin:)|(?=[\s:]\/)|(?=[$#(])|(?=:~))"
+        hostname = re.search(regex_pattern, prompt)
+
+        if hostname:
+            logger.info("Hostname: {}".format(hostname.group()))
+            return hostname.group()
+
+        return ''
 
 
 class BasicLine:
@@ -501,7 +554,7 @@ class BasicLine:
         :return: None
 
         """
-
+        self._reconnect_feature = {'enabled': False, 'max_retries': 0}
         self.spawn_id = spawn_id
         self.sm = sm
         self.type = type
@@ -509,9 +562,52 @@ class BasicLine:
         self.set_default_timeout(DEFAULT_TIMEOUT)
         self.spawn_command = self.spawn_id.spawn_command
         self.spawn_id.sendline()
-        self.sm.go_to('any', spawn_id, timeout=timeout)
+        self.go_to('any', timeout=timeout)
         # set default timeout value for functions in this class,
         # such as ssh_console(), ssh_vty(), etc.
+
+    @property
+    def reconnect_feature(self):
+        """
+        Getter
+        Property can be used to enable/disable the auto reconnect feature for
+        cases when the device closes the ssh connection.
+        :return: a dict with the current settings
+            {
+                'enabled': True, -> reconnect mechanism is enabled
+                'max_retries': 3 -> max. number of retries to reconnect
+            }
+        """
+        return self._reconnect_feature
+
+    @reconnect_feature.setter
+    def reconnect_feature(self, value):
+        """
+        Setter
+        Property can be used to enable/disable the auto reconnect feature for
+        cases when the device closes the shh connection.
+        :param value: a dict providing the following settings
+            {
+                'enabled': True, -> reconnect mechanism is enabled
+                'max_retries': 3 -> max. number of retries to reconnect
+            }
+        :return: None
+        """
+        if not isinstance(value, dict):
+            raise RuntimeError('You have to provide a dictionary.')
+        if not isinstance(value.get('enabled', None), bool):
+            raise RuntimeError('Please read the setter documentation. You must provide a bool value for the enabled'
+                               ' field.')
+        if bool(value['enabled']):
+            if not isinstance(value.get('max_retries', None), int):
+                raise RuntimeError('Please read the setter documentation. You must provide an int value for the '
+                                   'max_retries field.')
+            logger.info('\n\n\nYou have enabled the reconnect feature. You have specified max_retries to be {}. This '
+                        'may hide bugs. Use with caution.\n\n\n'.format(value['max_retries']))
+        else:
+            self._reconnect_feature.update({'enabled': False, 'max_retries': 0})
+            logger.info('\n\n\nYou have disabled the reconnect feature.\n\n\n')
+        self._reconnect_feature.update(value)
 
     def set_default_timeout(self, timeout):
         """Set the default timeout value for this line.
@@ -536,7 +632,103 @@ class BasicLine:
         """
         if not kwargs.get('timeout', None):
             kwargs['timeout'] = 30
-        self.sm.go_to(state, self.spawn_id, **kwargs)
+        try:
+            self.sm.go_to(state, self.spawn_id, **kwargs)
+        except StateMachineError as st_err:
+            if st_err.__cause__:
+                logger.error('Encountered state machine error with underlying '
+                             'cause {}'.format(traceback.format_tb(
+                    st_err.__cause__.__traceback__)))
+                logger.error("If the cause of the exception seems to be an ssh "
+                             "disconnect issue (like a network outage), you can "
+                             "use the reconnect feature to handle it. Check out "
+                             "the reconnect_feature property of this object.")
+            self.do_reconnect(st_err, kwargs['timeout'])
+            self.sm.go_to(state, self.spawn_id, **kwargs)
+
+    def recreate_connection_spawn(self, timeout):
+        logger.info('Recreating connection spawn ...')
+        new_spawn_id = NewSpawn(self.spawn_command)
+
+        ctx = AttributeDict(
+            {'password': self.sm.patterns.login_password})
+        d = Dialog([
+            ['continue connecting (yes/no)?', 'sendline(yes)', None,
+             True,
+             False],
+            ['(p|P)assword:', 'sendline_ctx(password)', None, True,
+             False],
+            ['Password OK', 'sendline()', None, False, False],
+            ['[.*>#$] ', 'sendline()', None, False, False],
+        ])
+
+        d.process(new_spawn_id, context=ctx, timeout=timeout)
+        self.spawn_id.close()
+        self.spawn_id = new_spawn_id
+
+    def bring_device_to_previous_state(self, initial_state, timeout):
+        logger.info('Device was previously disconnected in {} state. Taking device back to the state it was in when '
+                    'the disconnect happened ...'.format(initial_state))
+        self.sm.go_to('any', self.spawn_id)
+        # at reconnection, reconfigure the terminal if needed
+        self.reconfigure_terminal(timeout)
+        self.sm.go_to(initial_state, self.spawn_id)
+
+    def do_reconnect_(self, timeout):
+        initial_state = self.sm.current_state
+        self.recreate_connection_spawn(timeout)
+        self.bring_device_to_previous_state(initial_state, timeout)
+
+    def do_reconnect(self, error_reason=None, timeout=30):
+        io_err = "Input/output error"
+        # only reconnect for i/o errors direct exception or cause of exception
+        should_handle = io_err in str(error_reason) or (
+                error_reason.__cause__ and io_err in str(
+            error_reason.__cause__))
+        if not should_handle:
+            raise error_reason
+
+        # if feature is not enabled just fail
+        if not self._reconnect_feature['enabled']:
+            raise error_reason
+
+        # show the disclaimer to the user to make them aware this
+        # feature is activated and may hide bugs
+        logger.warning('\n\n\nDISCLAIMER: YOU HAVE ENABLED THE SSH RECONNECT '
+                    'FEATURE WHICH WILL TRY TO RECONNECT TO THE DEVICE '
+                    'IN CASE SSH IS TIMED OUT OR SUDDENLY DROPS. THIS '
+                    'MAY HIDE BUGS. USE WITH CAUTION AND AT YOUR OWN PERIL.'
+                    '\n\n\n')
+
+        logger.error('Line was disconnected, trying to reconnect...')
+        logger.error('Disconnected due to {}'.format(traceback.format_tb(
+            error_reason.__traceback__)))
+        if error_reason.__cause__:
+            # An exception was thrown and caught by code that throwed
+            # another exception so printing also the cause if it is available
+            logger.error(
+                'Cause exception traceback: {}'.format(traceback.format_tb(
+                    error_reason.__cause__.__traceback__)))
+
+        retry = int(self._reconnect_feature['max_retries'])
+        exception_raised = None
+        while retry > 0:
+            try:
+                self.do_reconnect_(timeout)
+                # mark successful reconnect
+                exception_raised = None
+                break
+            except Exception as e:
+                exception_raised = e
+                retry -= 1
+                logger.error('Connection could not be reestablished.')
+                logger.error('Exception encountered: {}'.format(
+                    traceback.format_tb(e.__traceback__)))
+        # if reconnect was not successful (meaning exception_raised is not None)
+        # and the number of max retries has been reached then we seem to not
+        # be able to reconnect so throwing the exception and failing
+        if exception_raised != None:
+            raise exception_raised
 
     def execute(self, cmd, timeout=None, exception_on_bad_command=False,
                 prompt=None):
@@ -557,47 +749,45 @@ class BasicLine:
 
         if not prompt:
             prompt = self.sm.get_state(self.sm.current_state).pattern
-        initial_state = self.sm.current_state
+
         try_reconnect = False
+        reason_for_reconnect = None
+        output = None
         try:
-            # clear buffer before running a command
-            if self.spawn_id.read_update_buffer():
-                if all(i in self.spawn_id.buffer for i in
-                       ['Connection', 'closed']):
-                    try_reconnect = True
-                else:
-                    self.spawn_id.buffer = ''
+            output = self.execute_(cmd, timeout, exception_on_bad_command,
+                                   prompt)
         except OSError as e:
             if self.type in ['ssh', 'ssh_vty']:
                 try_reconnect = True
+                reason_for_reconnect = e
             else:
                 logger.error('Error while executing command: ', e)
                 raise e
+
         if try_reconnect:
-            # closing initial spawn
-            self.spawn_id.close()
-            logger.info('Line was disconnected, trying to reconnect')
-            new_spawn_id = NewSpawn(self.spawn_command)
+            self.do_reconnect(error_reason=reason_for_reconnect,
+                              timeout=timeout)
+            output = self.execute_(cmd, timeout, exception_on_bad_command,
+                                   prompt)
 
-            ctx = AttributeDict({'password': self.sm.patterns.login_password})
-            d = Dialog([
-                ['continue connecting (yes/no)?', 'sendline(yes)', None, True,
-                 False],
-                ['(p|P)assword:', 'sendline_ctx(password)', None, True, False],
-                ['Password OK', 'sendline()', None, False, False],
-                ['[.*>#$] ', 'sendline()', None, False, False],
-            ])
-            try:
-                d.process(new_spawn_id, context=ctx, timeout=timeout)
-                self.spawn_id = new_spawn_id
-                self.go_to('any')
-                # at reconnection, reconfigure the terminal if needed
-                self.__reconfigure_terminal(timeout)
-                self.go_to(initial_state)
-            except:
-                logger.error('Connection could not be reestablished')
-                raise RuntimeError('Connection could not be reestablished')
+        return self.remove_prompt_from_output(prompt, output)
 
+    def execute_(self, cmd, timeout, exception_on_bad_command, prompt):
+        """Stay in current mode, run the command and return the output.
+
+        :param cmd: a string, such as "show nameif"
+        :param timeout: in seconds
+        :param exception_on_bad_command: True/False - whether to raise an exception
+            on a bad command
+        :param prompt: a string representing a pattern to match against the content of the buffer
+                      if not given, the pattern of the current state will be used
+        :return: output as string
+
+        """
+        # clear buffer before running a command
+        if self.spawn_id.read_update_buffer():
+            self.spawn_id.buffer = ''
+        ########Remove CSCvq65169 workaround ###
         self.spawn_id.sendline(cmd)
 
         # fmc/ftd inserts ' \r' for every 80 chars. sometimes for unknown
@@ -621,10 +811,10 @@ class BasicLine:
 
         return self.remove_prompt_from_output(prompt, output)
 
-    def __reconfigure_terminal(self, timeout):
+    def reconfigure_terminal(self, timeout):
         # in case of kp and wm, the reconnection is done directly to the ftd
         # so we have to go to 'fxos_state' to reconfigure the terminal
-        if self.line_type in ['KpLine', 'WmLine']:
+        if self.line_type in ['KpLine', 'WmLine'] and self.chassis_line:
             self.go_to('fxos_state')
         if self.line_type in TYPE_TO_STATE_MAP.keys() and self.sm.current_state is TYPE_TO_STATE_MAP[self.line_type]:
             current_prompt = self.sm.get_state(self.sm.current_state).pattern
@@ -863,27 +1053,30 @@ class BasicLine:
         :return: None
 
         """
+        if self.spawn_id is not None:
+            if self.type in ['ssh', 'ssh_vty']:
+                # send \n + ~.
+                self.spawn_id.sendline('')
+                self.spawn_id.send('~.')
+                try:
+                    self.spawn_id.expect('Connection to .* closed.')
+                    logger.debug('ssh line disconnected successfully')
+                except OSError as e:
+                    logger.debug('Connection closed message did not appear: '
+                                 'Encountered exception: {}.'.format(
+                        traceback.format_tb(e.__traceback__)))
+            elif self.type == 'telnet':
+                # send ctrl + ], then q
+                self.spawn_id.send('\035')
+                self.spawn_id.expect('telnet> ')
+                self.spawn_id.sendline('q')
+                self.spawn_id.expect('Connection closed.')
+                logger.debug('telnet line disconnected successfully')
 
-        if self.type in ['ssh', 'ssh_vty']:
-            # send \n + ~.
-            self.spawn_id.sendline('')
-            self.spawn_id.send('~.')
-            try:
-                self.spawn_id.expect('Connection to .* closed.')
-                logger.debug('ssh line disconnected successfully')
-            except OSError:
-                logger.debug('Connection closed message did not appear: '
-                             'Encountered exception: {}.'.format(
-                    traceback.format_exc()))
-        elif self.type == 'telnet':
-            # send ctrl + ], then q
-            self.spawn_id.send('\035')
-            self.spawn_id.expect('telnet> ')
-            self.spawn_id.sendline('q')
-            self.spawn_id.expect('Connection closed.')
-            logger.debug('telnet line disconnected successfully')
-
-        self.spawn_id.close()
+            self.spawn_id.close()
+        else:
+            logger.info('You have already closed the connection to this device previously.')
+        self.spawn_id = None
 
     def sendline(self, cmd):
         """Stay in current mode and run the command without expecting the prompt or returning the output
@@ -979,7 +1172,7 @@ class BasicLine:
         while up_flag:
             try:
                 self.execute('pwd')
-            except (TimeoutError, RuntimeError):
+            except (uniconTimeoutError, RuntimeError):
                 logger.info('Connection lost. System is rebooting...')
                 up_flag = False
 
@@ -1044,7 +1237,7 @@ def _set_password(line, username, new_password):
         d_set_password.process(line.spawn_id, timeout=120)
         line.sm.update_cur_state('sudo_state')
         logger.info('Changing password successfully')
-    except TimeoutError:
+    except uniconTimeoutError:
         logger.error('Changing password for {} user has failed'.format(username))
         raise Exception('Error while changing default password for {} user'.format(username))
 

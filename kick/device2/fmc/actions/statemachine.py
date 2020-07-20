@@ -43,11 +43,16 @@ class FmcStatemachine(StateMachine):
                                  Dialog([self.statements.login_password_statement]))
 
         admin_to_prelogin = Path(admin_state, prelogin_state, 'exit', None)
+        ##New added state
+        prelogin_to_fireos_path = Path(prelogin_state, fireos_state, 'admin',
+                                       Dialog([self.statements.login_password_statement]))
+        ###End
 
         # transitions from and to 'fireos_state' state
         fireos_to_admin_path = Path(fireos_state, admin_state, 'expert', None)
         admin_to_fireos_path = Path(admin_state, fireos_state, 'exit', None)
         fireos_to_prelogin = Path(fireos_state, prelogin_state, 'exit', None)
+
 
         # Add paths to the State Machine
         self.add_path(admin_to_sudo)
@@ -57,6 +62,7 @@ class FmcStatemachine(StateMachine):
         self.add_path(fireos_to_admin_path)
         self.add_path(admin_to_fireos_path)
         self.add_path(fireos_to_prelogin)
+        self.add_path(prelogin_to_fireos_path)
 
         # after inactivity timer, it will go back to prelogin:
         self.add_default_statements([self.statements.login_password, self.statements.login_incorrect])

@@ -16,7 +16,6 @@ class KpStateMachine(StateMachine):
 
     def create(self):
         # Create States and their state patterns
-        prelogin_state = State('prelogin_state', self.patterns.prompt.prelogin_prompt)
         fxos_state = State('fxos_state', self.patterns.prompt.fxos_prompt)
         fireos_state = State('fireos_state', self.patterns.prompt.fireos_prompt)
         expert_state = State('expert_state', self.patterns.prompt.expert_prompt)
@@ -30,7 +29,6 @@ class KpStateMachine(StateMachine):
         config_state = State('config_state', self.patterns.prompt.config_prompt)
 
         # Add our states to the state machine
-        self.add_state(prelogin_state)
         self.add_state(fxos_state)
         self.add_state(fireos_state)
         self.add_state(expert_state)
@@ -42,8 +40,6 @@ class KpStateMachine(StateMachine):
         self.add_state(config_state)
 
         # Create paths for switching between states
-        prelogin_to_fxos = Path(prelogin_state, fxos_state, '', self.dialogs.d_prelogin_to_fxos)
-        fxos_to_prelogin = Path(fxos_state, prelogin_state, 'top; exit', None)
         fxos_to_ftd = Path(fxos_state, fireos_state, "connect ftd", None)
         fxos_to_local_mgmt = Path(fxos_state, local_mgmt_state, "connect local-mgmt", None)
         ftd_to_expert = Path(fireos_state, expert_state, "expert", None)
@@ -51,20 +47,16 @@ class KpStateMachine(StateMachine):
         ftd_sudo_to_expert = Path(sudo_state, expert_state, "exit", None)
         expert_to_ftd = Path(expert_state, fireos_state, "exit", None)
         local_mgmt_to_fxos = Path(local_mgmt_state, fxos_state, "exit", None)
+        # there are two paths from fireos_state to fxos_state.
+        # 1. if on console, type "exit". if you type "connect fxos" you will be prompted to use "exit".
+        # 2. if on mgmt vty, type "connect fxos". if you type "exit", you will lose the vty.
+        # the following dialog tries "connect fxos" first, if prompted, uses "exit". it should work on both.
         ftd_to_fxos = Path(fireos_state, fxos_state, "connect fxos", self.dialogs.d_ftd_to_fxos)
 
         # Crete lina cli paths
-        expert_to_disable_path = Path(expert_state, disable_state, 'sudo lina_cli',
-                                      self.dialogs.ftd_dialogs.d_expert_to_disable)
         fireos_to_disable_state = Path(fireos_state, disable_state,
                                        'system support diagnostic-cli',
-                                       self.dialogs.ftd_dialogs.d_enable_to_disable)
-        fireos_to_enable_state = Path(fireos_state, enable_state,
-                                      'system support diagnostic-cli',
-                                      self.dialogs.ftd_dialogs.d_disable_to_enable)
-        fireos_to_config_state = Path(fireos_state, config_state,
-                                      'system support diagnostic-cli',
-                                      self.dialogs.ftd_dialogs.d_endisable_to_conft)
+                                       None)
         disable_to_enable_state = Path(disable_state, enable_state, 'en',
                                        self.dialogs.ftd_dialogs.disable_to_enable)
         enable_to_disable_state = Path(enable_state, disable_state, "disable", None)
@@ -76,25 +68,20 @@ class KpStateMachine(StateMachine):
         config_to_enable_path = Path(config_state, enable_state, 'end', None)
 
         # Add paths to the State Machine
-        self.add_path(prelogin_to_fxos)
-        self.add_path(fxos_to_prelogin)
         self.add_path(fxos_to_ftd)
+        self.add_path(ftd_to_fxos)
         self.add_path(fxos_to_local_mgmt)
+        self.add_path(local_mgmt_to_fxos)
         self.add_path(ftd_to_expert)
+        self.add_path(expert_to_ftd)
         self.add_path(ftd_expert_to_sudo)
         self.add_path(ftd_sudo_to_expert)
-        self.add_path(expert_to_ftd)
-        self.add_path(ftd_to_fxos)
-        self.add_path(local_mgmt_to_fxos)
-        self.add_path(expert_to_disable_path)
         self.add_path(fireos_to_disable_state)
-        self.add_path(fireos_to_enable_state)
-        self.add_path(fireos_to_config_state)
+        self.add_path(disable_to_fireos_path)
         self.add_path(disable_to_enable_state)
         self.add_path(enable_to_disable_state)
-        self.add_path(disable_to_fireos_path)
         self.add_path(enable_to_config_path)
         self.add_path(config_to_enable_path)
 
         # after inactivity timer, it will go back to prelogin:
-        self.add_default_statements(self.statements.login_password)
+        self.add_default_statements([self.statements.login_incorrect, self.statements.login_password])

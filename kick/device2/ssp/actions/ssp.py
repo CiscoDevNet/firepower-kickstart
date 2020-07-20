@@ -81,13 +81,13 @@ class Ssp(BasicDevice):
                                '"container"')
 
         # set login_username and login_password
-        self.patterns = SspPatterns(login_username, login_password,
-                                    sudo_password, slot_id, app_hostname)
+        hostname = "({}|firepower)".format(hostname)
+        self.patterns = SspPatterns(hostname, login_username, login_password,
+                                    sudo_password, slot_id, app_hostname, deploy_type, app_identifier)
 
         # create the state machine that contains the proper attributes.
-        hostname = "({}|firepower)".format(hostname)
-        self.sm = SspStateMachine(self.patterns, hostname, deploy_type,
-                                  app_identifier)
+
+        self.sm = SspStateMachine(self.patterns)
 
         SspConstants.power_bar_server = power_bar_server
         SspConstants.power_bar_port = power_bar_port
@@ -235,6 +235,15 @@ class SspLine(BasicLine):
         self.power_bar_user = SspConstants.power_bar_user
         self.power_bar_pwd = SspConstants.power_bar_pwd
 
+    def bring_device_to_previous_state(self, initial_state, timeout):
+        logger.info('Device was previously disconnected in {} state. Taking device back to the state it was in when'
+                    'the disconnect happened ...'.format(initial_state))
+        self.sm.go_to('any', self.spawn_id)
+        super().reconfigure_terminal(timeout)
+        # at reconnection, reconfigure the terminal if needed
+        self.sm.go_to('fpr_module_state', self.spawn_id)
+        self.sm.go_to(initial_state, self.spawn_id)
+
     def go_to(self, state, timeout=30):
         """
             Override parent go_to function to enable hop_wise flag.
@@ -249,9 +258,9 @@ class SspLine(BasicLine):
                 timeout=timeout)
 
     def __handle_session_disconnect_for_ftd_states(self,
-                                                  destination_state,
-                                                  state_machine_exception,
-                                                  timeout=10):
+                                                   destination_state,
+                                                   state_machine_exception,
+                                                   timeout=10):
         """
             The following implementation tries to bring back the user to the
             state he was in on the ftd hosted over the chassis if the chassis
@@ -299,7 +308,7 @@ class SspLine(BasicLine):
                     pass
                 i += 1
             if i >= 3:
-                # something other than a logout occured. check first if it has recovered
+                # something other than a logout occurred. check first if it has recovered
                 if not self.sm.current_state == 'fpr_module_state':
                     raise state_machine_exception
                 return
@@ -443,6 +452,10 @@ class SspLine(BasicLine):
             r = re.search('(\w+)://[\w.\-]+/([\w\-./]+)', file_url)
             assert r, "unknown file_url: {}".format(file_url)
             full_path = r.group(2)
+        elif file_url.startswith("http"):
+            r = re.search('(\w+)://[\w.\-]+/([\w\-./]+)', file_url)
+            assert r, "unknown file_url: {}".format(file_url)
+            full_path = r.group(2)
         else:
             raise RuntimeError("Incorrect file url download protocol")
 
@@ -458,10 +471,11 @@ class SspLine(BasicLine):
                 logger.info("download completed for {}".format(image_name))
                 return download_status
             elif download_status == "Downloading":
-                now = datetime.datetime.now()
-                elapsed_time = (now - start_time).total_seconds()
+                logger.info("downloading is in progress for {}".format(image_name))
             elif download_status == "Failed":
                 return download_status
+            now = datetime.datetime.now()
+            elapsed_time = (now - start_time).total_seconds()
         raise RuntimeError("download took too long: {}".format(image_name))
 
     def is_bundle_on_chassis(self, fxos_url):
@@ -533,7 +547,7 @@ class SspLine(BasicLine):
                     raise logger.error("Issue downloading the fxos file to the container.")
 
             d1 = Dialog([
-                ['{} login: '.format(self.sm.dev_hostname), 'sendline({})'.format(self.sm.patterns.login_username),
+                ['{} login: '.format(self.sm.patterns.dev_hostname), 'sendline({})'.format(self.sm.patterns.login_username),
                  None, True, False],
                 ['Password:', 'sendline({})'.format(self.sm.patterns.login_password), None, True, False],
                 ['.*Successful login attempts for user.*', None, None, False, False],
@@ -553,12 +567,19 @@ class SspLine(BasicLine):
             time.sleep(5)
 
             d1 = Dialog([
+                ['Invalid Value', None, None, False, False],
+                ['Download failure - No such file', None, None, False, False],
                 ['continue connecting (yes/no)?', 'sendline(yes)', None, True, False],
                 ['Password:', 'sendline({})'.format(file_server_password),
                  None, True, False],
                 [self.sm.get_state('mio_state').pattern, None, None, False, False],
             ])
-            d1.process(self.spawn_id)
+            response = d1.process(self.spawn_id)
+            if response and 'Invalid Value' in response.match_output:
+                raise RuntimeError("Download Failed - unsupported download protocol")
+
+            if response and 'Download failure - No such file' in response.match_output:
+                raise RuntimeError("Download Failed - File not found on the server")
 
             status = self._wait_till_download_complete(fxos_url)
 
@@ -623,8 +644,10 @@ class SspLine(BasicLine):
                 return
 
     def parse_firmware_monitor(self):
-        """"show firmware Monitor" gives something like this: FPRM: Package-
-        Vers: 1.1(4.95) Upgrade-Status: Ready.
+        """"show firmware Monitor" gives something like this:
+          FPRM:
+            Package-Vers: 1.1(4.95)
+            Upgrade-Status: Ready.
 
           Fabric Interconnect A:
             Package-Vers: 2.0(1.68)
@@ -814,10 +837,10 @@ class SspLine(BasicLine):
             show logical-device detail
         '''
         self.go_to('mio_state')
-        output = self.execute_lines(cmd_lines)
+        output = self.execute_lines(cmd_lines, timeout=60)
 
         LogicalDevice = collections.namedtuple('LogicalDevice', [
-            'name', 'slot_id', 'mode', 'operational_state', 'template_name'])
+            'name', 'slot_id', 'mode', 'operational_state', 'template_name', 'error_msg'])
         logical_device_list = []
 
         for line in output.split('\n'):
@@ -846,11 +869,15 @@ class SspLine(BasicLine):
                     continue
             if a_name == 'Template Name':
                 vtemp = a_value
+                continue
+            if a_name == "Error Msg":
+                verr_msg = a_value
                 logical_device = LogicalDevice(name=vname,
                                                slot_id=vslot,
                                                mode=vmode,
                                                operational_state=voper,
-                                               template_name=vtemp)
+                                               template_name=vtemp,
+                                               error_msg=verr_msg)
                 logical_device_list.append(logical_device)
                 logger.info(str(logical_device_list))
                 continue
@@ -1075,7 +1102,7 @@ class SspLine(BasicLine):
         if not r:
             return []  # nothing found
         output = output[r.span()[1]:].strip()
-        r = re.search('(\-+ ){6}\-+', output)
+        r = re.search('(\-+ ){5,}\-+', output)
         if not r:
             return []
         output = output[r.span()[1]:].strip()
@@ -1089,7 +1116,7 @@ class SspLine(BasicLine):
             line = line.strip()
             if line == '':
                 continue
-            r = re.search('^(\w+)\s+([\d\.]+)\s+([\w/]+)\s+(\w+)\s+(\w+)\s+'
+            r = re.search('^(\w+)\s+([\d\.]+)\s+([\w/]+)?\s+(\w+)\s+([\w,]+)\s+'
                           '(\w+)\s+(\w+)', line)
             if not r:
                 continue
@@ -1136,7 +1163,7 @@ class SspLine(BasicLine):
         raise RuntimeError("{}({}) took too long to return True" \
                            "".format(stop_func, stop_func_args))
 
-    def _get_slot_operational_state(self, slot_id):
+    def get_slot_operational_state(self, slot_id):
         """Get operational state for slot_id, e.g. Online.
 
         :return: operational state
@@ -1152,7 +1179,7 @@ class SspLine(BasicLine):
         self.go_to('mio_state')
         output = self.execute_lines(cmd_lines)
 
-        r = re.search("Oper(.*) State: (\w+)", output)
+        r = re.search("Oper(.*) State: ([\w ]+)", output)
 
         return r.group(2)
 
@@ -1164,7 +1191,7 @@ class SspLine(BasicLine):
 
         """
 
-        return self._get_slot_operational_state(slot_id) == 'Online'
+        return self.get_slot_operational_state(slot_id) == 'Online'
 
     def wait_till_slot_online(self, slot_id, wait_upto=300):
         """Wait till module of slot_id is Online.
@@ -1205,7 +1232,7 @@ class SspLine(BasicLine):
                                                         app_instance_name, slot_id)
         app_instance = app_instance[0]
         if app_instance.admin_state == 'Enabled' and \
-                        app_instance.operational_state == 'Online':
+                app_instance.operational_state == 'Online':
             if not in_cluster_mode:
                 return True
             state = app_instance.cluster_oper_state
@@ -1295,7 +1322,7 @@ class SspLine(BasicLine):
         self.go_to('mio_state')
         output = self.execute_lines(cmd_lines)
 
-        r = re.search("{}\s+(([\w.()]+))".format(bundle_package_name), output)
+        r = re.search("{}\s+(([\w.()-]+))".format(bundle_package_name), output)
         # Check whether the package exists in show package
         # If not extract the version from bundle_package_name
         if not r:
@@ -1349,7 +1376,8 @@ class SspLine(BasicLine):
         app_instance_name = r.group(1)
 
         # Secret bootstrap keys don't work with execute_lines, so find and extract them first
-        manual_cmd_list = re.split(r'(create bootstrap-key-secret .*?exit\s)', cmd_lines, flags=re.MULTILINE+re.DOTALL)
+        manual_cmd_list = re.split(r'(create bootstrap-key-secret .*?exit\s)', cmd_lines,
+                                   flags=re.MULTILINE + re.DOTALL)
 
         # Run cmd_lines to create the app-instance and logical-device
         # Set longer timeout value for "accept_license_agreement" to finish
@@ -1505,11 +1533,15 @@ class SspLine(BasicLine):
                                                   wait_upto=wait_upto)
         for slot_id in slot_list:
             logger.info('Connecting to FTD from slot {} and changing password '.format(slot_id))
-            p = SspPatterns(self.sm.patterns.login_username,
-                            self.sm.patterns.login_password,
-                            self.sm.patterns.sudo_password,
-                            slot_id, 'Firepower-module.*|firepower')
-            new_sm = SspStateMachine(p, self.sm.dev_hostname)
+            p = SspPatterns(hostname=self.sm.patterns.dev_hostname,
+                            login_username=self.sm.patterns.login_username,
+                            login_password=self.sm.patterns.login_password,
+                            sudo_password=self.sm.patterns.sudo_password,
+                            slot_id=slot_id,
+                            app_hostname='firepower',
+                            deploy_type=self.sm.patterns.deploy_type,
+                            app_identifier=app_instance_name)
+            new_sm = SspStateMachine(p)
             self.sm = new_sm
             self.spawn_id.sendline()
             self.go_to('any')
@@ -1731,42 +1763,44 @@ class SspLine(BasicLine):
 
     def upgrade_bundle_package(self, bundle_package_name):
         """Upgrade bundle package.
-
         :param bundle_package_name: e.g. fxos-k9.2.1.1.64.SPA
         :return: None
-
         """
-
         version = self.get_bundle_package_version(bundle_package_name)
         if self.is_firmware_monitor_ready(version):
             # the bundle package has already been installed
             logger.info("fxos bundle package {} has been installed, " \
                         "nothing to do".format(bundle_package_name))
             return False
+
         cmd_lines = """
             top
             scope firmware
             scope auto-install
         """
+        ########### Remove workaround (CSCvq65169) ######
         self.execute_lines(cmd_lines)
+        ########## end of removal ################
+
         try:
             self.spawn_id.sendline("install platform platform-vers {}".format(version))
 
-            # Handle the first question
-            d1 = Dialog([
-                ['Do you want to proceed', 'sendline(yes)', None, False, False],
-            ])
-            d1.process(self.spawn_id, timeout=30)
         except:
             logger.error("Invalid FXOS platform software package {}".format(version))
             return False
 
-        # Check whether system will reboot
-        will_system_reboot = False
+        # handle reboot question and check whether system will reboot; the below regex consumes all the output
+        # that comes from the device after the above command is sent this may include the skip for reboot
+        # message (INFO: There is no service impact to install this FXOS platform software 2.6(1.156)) or not
+        # which is processed below
+        will_system_reboot = True
         d2 = Dialog([
-            ['INFO: There is no service impact to install this FXOS platform software',
-             None, None, False, False],
+            ['.*Do you want to proceed', 'sendline(yes)', None, False, False],
         ])
+        # check if the device said it will not reboot
+        d2_result = d2.process(self.spawn_id, timeout=30)
+        if 'no service impact to install this FXOS' in d2_result.match_output:
+            will_system_reboot = False
         d1 = Dialog([
             [r'.*Do you want to.*', 'sendline(yes)', None, False, False],
         ])
@@ -1775,19 +1809,10 @@ class SspLine(BasicLine):
             d1.process(self.spawn_id, timeout=30)
         except:
             pass
-
-        try:
-            d2.process(self.spawn_id, timeout=10)
-            logger.info('\nSystem will not reboot.')
-            # Handle the second question
-            d1 = Dialog([
-                ['Do you want to proceed', 'sendline(yes)', None, False, False],
-            ])
-            d1.process(self.spawn_id, timeout=10)
-        except:
-            # d2.process(self.spawn_id, timeoutwill_system_reboot = True=10)
+        if will_system_reboot:
             logger.info('\nSystem will reboot ...')
-            will_system_reboot = True
+        else:
+            logger.info('\nSystem will not reboot ...')
 
         # If system will reboot, will wait for the following prompts
         if will_system_reboot:
@@ -1795,7 +1820,7 @@ class SspLine(BasicLine):
             logger.info('==== Waiting for messages in rebooting ...')
 
             d1 = Dialog([
-                ['{} login: '.format(self.sm.dev_hostname), 'sendline({})'.format(self.sm.patterns.login_username),
+                ['{} login: '.format(self.sm.patterns.dev_hostname), 'sendline({})'.format(self.sm.patterns.login_username),
                  None, True, False],
                 ['Password:', 'sendline({})'.format(self.sm.patterns.login_password), None, True, False],
                 ['.*Successful login attempts for user.*', None, None, True, False],
@@ -1811,13 +1836,13 @@ class SspLine(BasicLine):
                 ['vdc 1 has come online', None, None, False, False],
                 [r'Connection to .* closed.', None, None, False, False],
             ])
-            d1.process(self.spawn_id, timeout=1800)
+            d1.process(self.spawn_id, timeout=3600)
 
             logger.info('==== Reconnect after reboot...')
             # Wait for reboot to finish and reconnect
             time.sleep(480)
-            self.monitor_installation(version=version, timeout=2400)
-            return True
+
+        self.monitor_installation(version=version, timeout=2400)
         return True
 
     def monitor_installation(self, version, timeout=1500):
@@ -1849,7 +1874,7 @@ class SspLine(BasicLine):
         return ('Oper State: Online' in slot_status and
                 'Disk Format Status: 100%' in slot_status)
 
-    def reinitialize_slot(self, slot_id, wait_upto = 600):
+    def reinitialize_slot(self, slot_id, wait_upto=900):
         reinitialize_slot_cmd = """
             top
             scope ssa
@@ -1860,6 +1885,18 @@ class SspLine(BasicLine):
         self.execute_lines(reinitialize_slot_cmd)
         time.sleep(10)
         self.wait_till(self.is_slot_reinitialized, slot_id, wait_upto)
+
+    def check_all_logical_devices_configuration(self):
+        """
+        Method checks if one of the logical devices is configured improperly
+        """
+        logger.info('Checking logical device for reported configuration errors...')
+        # wait for logical device to report any errors
+        time.sleep(10)
+        for ld in self.get_logical_device_list():
+            if 'incomplete' in ld.operational_state.lower():
+                raise RuntimeError('Incomplete configuration of logical device: {}. Error Msg: {}'.format(
+                    ld.name, ld.error_msg))
 
     def set_default_auth_timeouts(self):
         """
@@ -1898,8 +1935,8 @@ class SspLine(BasicLine):
                                              http_url="",
                                              wait_upto=1800,
                                              power_cycle_flag=False,
-                                             reinitialize_slot = True,
-                                             delete_ld_and_app_instances = True,
+                                             reinitialize_slot=True,
+                                             delete_ld_and_app_instances=True,
                                              **kwargs):
         """Baseline function for fxos and application installation.
 
@@ -1986,7 +2023,10 @@ class SspLine(BasicLine):
         logger.info('=== Set ip addresses for mgmt, data and eventing interfaces')
         logger.info('=== Set domain, dns, firepower mode, device manager')
         logger.info('=== Also due to logical device creation app will be automatically created')
-        self.execute_lines(cmd_lines=cmd_lines_create_logical_device_app_instance, timeout=60)
+        self.execute_lines(cmd_lines=cmd_lines_create_logical_device_app_instance, timeout=60,
+                           exception_on_bad_command=True)
+
+        self.check_all_logical_devices_configuration()
 
         # wait for app to be created
         self.wait_for_app_creation(slot_id, app_instance_name='ftd', wait_upto=wait_upto)
@@ -2103,7 +2143,9 @@ class SspLine(BasicLine):
 
         # Set mgmt ip, netmask, gateway for each slot
         logger.info('=== Set mgmt ip, netmask, gateway for each slot')
-        self.execute_lines(cmd_lines_set_ftd_mgmt_networks)
+        self.execute_lines(cmd_lines_set_ftd_mgmt_networks, exception_on_bad_command=True)
+
+        self.check_all_logical_devices_configuration()
 
         # Create logical device and app instances
         logger.info('=== Validate app intances are up running ...')
@@ -2114,9 +2156,9 @@ class SspLine(BasicLine):
             wait_upto=wait_upto)
 
     def switch_to_module(self, slot_id, deploy_type='native',
-                         app_identifier=''):
+                         app_identifier='', app_hostname='firepower'):
         """Method used to switch between the modules
-        
+
         :param slot_id: the slot Id to connect to
         :param deploy_type: the deploy type of the app (container or native)
         :param app_identifier: the app identifier (in case of container deploy)
@@ -2125,13 +2167,14 @@ class SspLine(BasicLine):
 
         self.go_to('mio_state')
 
-        pattern = SspPatterns(self.sm.patterns.login_username,
+        pattern = SspPatterns(self.sm.patterns.hostname,
+                              self.sm.patterns.login_username,
                               self.sm.patterns.login_password,
                               self.sm.patterns.sudo_password,
-                              slot_id, 'Firepower-module.*|firepower')
+                              slot_id, app_hostname, deploy_type,
+                              app_identifier)
 
-        new_sm = SspStateMachine(pattern, self.sm.dev_hostname, deploy_type,
-                                 app_identifier)
+        new_sm = SspStateMachine(pattern)
         self.sm = new_sm
         self.spawn_id.sendline()
         self.go_to('any')
@@ -2183,8 +2226,9 @@ class SspLine(BasicLine):
 
     def disconnect(self):
         """Disconnect the Device."""
-        if self.type == 'ssh':
-            self.go_to('mio_state')
+        if self.spawn_id is not None:
+            if self.type == 'ssh':
+                self.go_to('mio_state')
         super().disconnect()
 
     def is_fxos_image_on_device(self, fxos_url):
@@ -2201,12 +2245,13 @@ class SspLine(BasicLine):
         app_version = re.search(r'\d+\.\d+\.\d+\.\d+', image_name).group(0)
         apps = self.execute_lines('top\nscope ssa\nshow app')
         found = re.search(r'\s+.*?\s*%s\s+' % re.escape(app_version),
-                                apps)
+                          apps)
         if found:
             return True
         return False
 
-    def baseline_by_branch_and_version(self, site, branch, version, cluster_flag, serverIp='', tftpPrefix='', scpPrefix='', docs='', fxosDir='', pxePassword='', **kwargs):
+    def baseline_by_branch_and_version(self, site, branch, version, cluster_flag, serverIp='', tftpPrefix='',
+                                       scpPrefix='', docs='', fxosDir='', pxePassword='', **kwargs):
         """Baseline Ssp by branch and version using PXE servers.
         Look for needed files on devit-engfs and releng29, copy them to the local kick server
         and use them to baseline the device.
@@ -2252,6 +2297,8 @@ class SspLine(BasicLine):
         :return:
 
         """
+
+        server_password = None
         if not kwargs.get('fxos_file') and not kwargs.get('fxos_url'):
             raise RuntimeError("Please provide the fxos version you want to use via fxos_file OR fxos_url")
 
@@ -2259,7 +2306,7 @@ class SspLine(BasicLine):
         fxos_file = kwargs.get('fxos_file', None) or fxos_url.split('/')[-1]
 
         is_sw_on_device = self.is_fxos_image_on_device(fxos_file) and \
-            self.is_app_image_on_device(version.lower().replace('-', '.').strip())
+                          self.is_app_image_on_device(version.lower().replace('-', '.').strip())
         if not is_sw_on_device:
             if KICK_EXTERNAL:
                 server_ip = serverIp
@@ -2267,7 +2314,7 @@ class SspLine(BasicLine):
                 scp_prefix = scpPrefix
                 files = docs
                 scp_fxos_link = 'scp://pxe@{}:{}/{}'.format(server_ip, fxosDir, fxos_file)
-                pxe_password = pxePassword
+                server_password = pxePassword
             else:
                 server_ip, tftp_prefix, scp_prefix, files = \
                     prepare_installation_files(site, 'Ssp', branch, version,
@@ -2275,6 +2322,7 @@ class SspLine(BasicLine):
                                                fxos_link=fxos_url)
                 scp_fxos_link = 'scp://pxe@{}:{}/{}'.format(
                     server_ip, pxe_dir['fxos_dir'], fxos_file)
+                server_password = pxe_password
 
             csp_file = [file for file in files if file.endswith('.csp')][0]
             scp_csp_link = "scp://pxe@{}:/{}/{}".format(server_ip,
@@ -2287,7 +2335,7 @@ class SspLine(BasicLine):
 
         kwargs['fxos_url'] = scp_fxos_link
         kwargs['csp_url'] = scp_csp_link
-        kwargs['scp_password'] = pxe_password
+        kwargs['scp_password'] = server_password
         kwargs['http_url'] = ''
 
         if cluster_flag:

@@ -6,18 +6,16 @@ server has both the img files mounted.  Image downloading is via http.
 The file server is a PXE server in each site.
 
 """
-import re
-import datetime
 import logging
-import subprocess
-import time
+
+import datetime
 
 logger = logging.getLogger(__name__)
 
-from unicon.eal.expect import Spawn, TimeoutError
 from unicon.eal.dialogs import Dialog
 from ...series3.actions.webserver import Webserver
 from ...fmc.actions import Fmc, FmcLine
+from .constants import Series3Constants
 
 try:
     from kick.graphite.graphite import publish_kick_metric
@@ -91,35 +89,13 @@ class Series3Fmc(Fmc):
 
          """
         publish_kick_metric('device.series3fmc.ssh_vty', 1)
-        if not timeout:
-            timeout = self.default_timeout
 
         from .constants import Series3Constants
         Series3Constants.uut_ssh_ip = ip
         Series3Constants.uut_ssh_port = port
 
-        if rsa_key:
-            resp = subprocess.getoutput('chmod 400 {}'.format(rsa_key))
-            if 'No such file or directory' in resp:
-                raise RuntimeError('The identity file {} you provided does not exist'.format(rsa_key))
-            spawn = Spawn('ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no '
-                          '-i {} -l {} -p {} {} \n'.format(rsa_key, username, port, ip))
-        else:
-            spawn = Spawn('ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no '
-                          '-l {} -p {} {} \n'.format(username, port, ip))
-
-        d1 = Dialog([
-            ['continue connecting (yes/no)?', 'sendline(yes)', None, True, False],
-            ['(p|P)assword:', 'sendline({})'.format(password),
-             None, False, False],
-        ])
-        try:
-            d1.process(spawn, timeout=timeout)
-        # spawn.sendline()
-        except TimeoutError:
-            pass
-
-        ssh_line = Series3FmcLine(spawn, self.sm, 'ssh_vty', timeout=timeout)
+        ssh_line = super().ssh_vty(ip=ip, port=port, username=username, password=password,
+                                   timeout=timeout, line_type=line_type, rsa_key=rsa_key)
 
         return ssh_line
 
@@ -138,19 +114,33 @@ class Series3FmcLine(FmcLine):
         self.sm = sm
         self.type = type
         self.set_default_timeout(DEFAULT_TIMEOUT)
+
         try:
             sm.go_to('any', spawn, timeout=timeout)
+            if self.sm.current_state == 'prelogin_state':
+                self.sendline(self.sm.patterns.login_username)
+                self.spawn_id.expect('[p|P]assword: ')
+                self.sendline(self.sm.patterns.login_password)
+                self.go_to('any')
+                if self.sm.current_state == 'admin_state':
+                    self.sm.remove_path('prelogin_to_fireos_path')
+                    self.sm.remove_path('fireos_to_prelogin_path')
+                elif self.sm.current_state == 'fireos_state':
+                    self.sm.remove_path('admin_to_prelogin')
+                    self.sm.remove_path('prelogin_to_admin')
+                else:
+                    pass
         except:
             # Catch the case fmc is back from installation
             # Does not have the stable state
             pass
-
     # the following functions are for device baselining. This only works on
     # a ssh connection.
-    def generate_config_file(self):
+    def generate_config_file(self,private_iso=False):
         """Compose the config file. Copy the config file to
         self.http_dir_for_build on Webserver. Create symbolic link to the iso
         image on Webserver.
+        :param private_iso: Flag for private iso configuration
 
         :return: None
 
@@ -184,10 +174,17 @@ TARGET_ARCH={}
         logger.info(output_ls)
         output_cat = dev.execute('cat {}'.format(self.config_path))
         logger.info(output_cat)
-        output = dev.execute('wget -O - http://{}:{}/{}'.format(self.http_server, self.http_port, self.config_file_url))
-        assert 'TRANS=httpsrv' in output, \
+        if private_iso:
+            output = dev.execute('wget -O - http://{}:{}/{}'.format(self.scp_server, self.http_port, self.config_file_url))
+            assert 'TRANS=httpsrv' in output, \
+                    '\nFailed to access the boot configuration file.\nVerify http_dir_tmp is correct.\nhttp://{}:{}/{}'. \
+                    format(self.scp_server, self.http_port, self.config_file_url)
+        else:
+            output = dev.execute(
+                'wget -O - http://{}:{}/{}'.format(self.http_server, self.http_port, self.config_file_url))
+            assert 'TRANS=httpsrv' in output, \
                 '\nFailed to access the boot configuration file.\nVerify http_dir_tmp is correct.\nhttp://{}:{}/{}'. \
-                format(self.http_server, self.http_port, self.config_file_url)
+                    format(self.http_server, self.http_port, self.config_file_url)
         dev.disconnect()
 
     def scp_file_to_local(self, local_dir, sftp_ip, sftp_port,
@@ -228,10 +225,11 @@ TARGET_ARCH={}
             'Failed to copy {}'.format(filename)
         return full_filename
 
-    def copy_bz_usb_files_setup_lilo_to_install(self):
+    def copy_bz_usb_files_setup_lilo_to_install(self,private_iso=False):
         """Scp bz and usb image files from remote sftp server to DUT. Configure
         lilo file on DUT. Execute run_lilo_and_depmod. Mount usb. Reboot to
         install.
+        :param private_iso: Flag for private iso lilo configuration
 
         :return: None
 
@@ -267,16 +265,28 @@ TARGET_ARCH={}
         cmd = "cat {} | perl -pe 's/default=[^\n]+/default=INSTALL/g'" \
               " > {}".format(DUT_LILO_TMPL_PATH, DUT_LILO_TMP_PATH)
         self.execute_only(cmd=cmd)
+        if private_iso:
 
-        lilo_append_lines = """
-image=/boot/{}
-      label=INSTALL
-      read-only
-      initrd=/boot/{}
-      append="root=/dev/ram0 rw PRESERVE_DATA=Yes choicedevice=eth0 INTEGCONF={}/{}"
-""".format(full_bz_filename, full_usb_filename, self.http_server, self.config_file_url)
-        cmd = '''echo '{}' >> {}'''.format(lilo_append_lines,
-                                           DUT_LILO_TMP_PATH)
+            lilo_append_lines = """
+    image=/boot/{}
+          label=INSTALL
+          read-only
+          initrd=/boot/{}
+          append="root=/dev/ram0 rw PRESERVE_DATA=Yes choicedevice=eth0 INTEGCONF={}/{}"
+    """.format(full_bz_filename, full_usb_filename, self.scp_server, self.config_file_url)
+            cmd = '''echo '{}' >> {}'''.format(lilo_append_lines,
+                                               DUT_LILO_TMP_PATH)
+        else:
+            lilo_append_lines = """
+            image=/boot/{}
+                  label=INSTALL
+                  read-only
+                  initrd=/boot/{}
+                  append="root=/dev/ram0 rw PRESERVE_DATA=Yes choicedevice=eth0 INTEGCONF={}/{}"
+            """.format(full_bz_filename, full_usb_filename, self.http_server, self.config_file_url)
+            cmd = '''echo '{}' >> {}'''.format(lilo_append_lines,
+                                               DUT_LILO_TMP_PATH)
+
         self.execute_only(cmd=cmd)
 
         self.execute('cat {}'.format(DUT_LILO_TMP_PATH))
@@ -323,7 +333,7 @@ image=/boot/{}
             raise RuntimeError(msg)
 
     def reconnect_and_process_dialog(self, device_reconnect_count, wait_time,
-                                     dialog_timeout, start_time, dialog_name, dialog, initial_string=""):
+                                     dialog_timeout, start_time, dialog_name, dialog,initial_string="",initial_password="Admin123"):
         """Reconnect to the device. Process the dialog. Device could reboot
         multiple times. Wait until the device can be accessed and dialog is
         processed.
@@ -335,13 +345,13 @@ image=/boot/{}
         :param dialog_name: dialog name used for logging info
         :param dialog: object of Dialog to be processed for device configuration
         :param initial_string: initial string sent to device to trigger dialog
+        :param initial_password: initial password after iso is installed, the default value is "Admin123"
         :return device_reconnect_count: incremented device reconnect count
 
         """
 
         count = 0
         total_count = 20
-        from .constants import Series3Constants
         now = datetime.datetime.now()
         elapsed_time = (now - start_time).total_seconds()
         if elapsed_time < self.installation_timeout:
@@ -351,7 +361,7 @@ image=/boot/{}
                 logger.info('=== Begin: {}'.format(dialog_name))
                 time.sleep(wait_time)
 
-                initial_password = self.sm.patterns.default_password
+                #initial_password = self.sm.patterns.default_password
 
                 tmp_fmc = self.fmc
                 tmp_uut_ip = self.uut_ip
@@ -363,19 +373,21 @@ image=/boot/{}
                                         timeout=self.ssh_timeout)
 
                 self.spawn_id = conn.spawn_id
-
                 self.fmc = tmp_fmc
                 self.uut_ip = tmp_uut_ip
                 self.version_build = tmp_version_build
 
                 device_reconnect_count += 1
                 logger.info('Device reconnected, {} times'.format(device_reconnect_count))
+                self.go_to('admin_state')
                 if initial_string is not "":
                     self.spawn_id.sendline(initial_string)
                 self.spawn_id.sendline()
                 dialog.process(self.spawn_id, timeout=dialog_timeout)
                 logger.info('=== End: {}'.format(dialog_name))
                 time.sleep(5)
+                if conn:
+                    conn.disconnect()
                 return device_reconnect_count
             except:
                 now = datetime.datetime.now()
@@ -384,9 +396,9 @@ image=/boot/{}
                             'wait for {} seconds ...'.format(elapsed_time, wait_time))
                 pass
 
-    def poll_device_and_configure(self):
+    def poll_device_and_configure(self,initial_password):
         """Poll device: wait for device to be up.
-
+        :param initial_password: Password with which device will come up after installation
         :return: None
 
         """
@@ -401,6 +413,7 @@ image=/boot/{}
             wait_time=600,
             dialog_timeout=30,
             start_time=start_time,
+            initial_password= initial_password,
             dialog_name='wait for device to be ready',
             dialog=d1,
             initial_string='ps aux | grep www')
@@ -419,7 +432,7 @@ image=/boot/{}
                             arch='x86_64',
                             console=False,
                             uut_ip6=None, uut_prefix=None, uut_gateway6=None,
-                            timeout=None, change_password=True, http_port='80'):
+                            timeout=None, change_password=True, http_port='80',ipv4_mode='static',ipv6_mode='',ntp_servers=''):
         """Install FMC iso image on Series 3 device via http.
 
         :param fmc: object of Series3fmc for reconnecting the device
@@ -506,9 +519,9 @@ image=/boot/{}
                                                                self.arch, self.usb_image)
         self.console = console
 
+
         logger.info('=== Generate config file on the http server ...')
         self.generate_config_file()
-
         logger.info('=== Copy bz and usb files to dut ...')
         logger.info('=== Generate lilo file on dut ...')
         self.go_to('sudo_state')
@@ -517,9 +530,13 @@ image=/boot/{}
         if not self.console:
             logger.info('=== Confirm device is rebooted ...')
             self.confirm_device_rebooted()
-
             logger.info('=== Wait for device to be up and configure device ...')
-            self.poll_device_and_configure()
+            self.poll_device_and_configure(initial_password=self.sm.patterns.default_password)
+            conn = self.fmc.ssh_vty(ip=Series3Constants.uut_ssh_ip,
+                                    port=Series3Constants.uut_ssh_port,
+                                    password=self.sm.patterns.default_password,
+                                    timeout=self.ssh_timeout)
+            self.spawn_id = conn.spawn_id
         else:
             logger.info('=== Console connection available, wait for login prompt ...')
             d = Dialog([
@@ -529,6 +546,13 @@ image=/boot/{}
                  None, False, False],
             ])
             d.process(self.spawn_id, timeout=self.installation_timeout)
+            self._first_login()
+            self.configuration_wizard(ipv4_mode=ipv4_mode, ipv6_mode=ipv6_mode,
+                                      ipv4=uut_ip, ipv4_netmask=uut_netmask,
+                                      ipv4_gateway=uut_gateway, ipv6=uut_ip6,
+                                      ipv6_prefix=uut_prefix, ipv6_gateway=uut_gateway6,
+                                      dns_servers=dns_server, search_domains=search_domains,
+                                      ntp_servers=ntp_servers)
         self.go_to('any')
         self.configure_network(uut_gateway, uut_ip, uut_netmask,
                                uut_ip6, uut_prefix, uut_gateway6,
@@ -607,7 +631,7 @@ image=/boot/{}
             files = docs
         else:
             server_ip, tftp_prefix, scp_prefix, files = prepare_installation_files(site, 's3fmc', branch, version,
-                                                                               iso=iso_file_type, arch_type=arch)
+                                                                                   iso=iso_file_type, arch_type=arch)
         if not files[0]:
             raise Exception('Series3 FMC iso file not found on server')
 
@@ -631,7 +655,6 @@ image=/boot/{}
                                                 '{}/{}'.format(pxe_dir['scp_dir_root'], branch))
             kwargs['http_dir_root'] = kwargs.get('http_dir_root', pxe_dir['http_dir_root'])
             kwargs['http_dir_tmp'] = kwargs.get('http_dir_tmp', pxe_dir['http_dir_tmp'])
-
         kwargs['iso_image_path'] = iso_file_name
         kwargs['version_build'] = version
         self.series3fmc_baseline(**kwargs)
@@ -798,4 +821,215 @@ image=/boot/{}
         spawn.expect('boot:')
         spawn.send("Restore_Serial\r")
         spawn.expect(prompt, timeout=120)
+
+    def baseline_by_branch_and_version_private_image(self, fmc, site, branch, version,
+                                       uut_ip,uut_netmask, uut_gateway,uut_password,iso_file_name,private_image_server,
+                                       dns_server, iso_file_type='Restore',
+                                       timeout=None, **kwargs):
+        """Baseline series3 fmc by branch and version using PXE servers on.
+        private ISO
+
+        Look for needed files on devit-engfs, copy them to the local kick server
+        and use them to baseline the device.
+
+        :param fmc: object of Series3fmc for reconnecting the device
+        :param site: e.g. 'ful', 'ast', 'bgl'
+        :param branch: branch name, e.g. 'Release', 'Feature'
+        :param version: software build-version, e,g, 6.2.3-623
+        :param uut_ip: Device IP Address
+        :param uut_netmask: Device Netmask
+        :param uut_gateway: Device Gateway
+        :param iso_file_name:Private iso image e.g '/scratch/moasano/Cisco_Firepower_Mgmt_Center_Virtual-6.5.0-1128.iso'
+        :param private_image_server:Private server on which the iso is placed. The same iso will be used to baseline the vFMC.
+        :param dns_server: DNS server
+        :param iso_file_type: 'Autotest' or 'Restore'; defaulted to 'Restore'
+        :param timeout: in seconds; time to wait for device to boot with the new image;
+                        if not provided, default baseline time is 7200s
+        :param \**kwargs:
+        :Keyword Arguments, any of below optional parameters:
+        :param hostname: hostname to be set, defaulted to 'firepower'
+        :param search_domains: search domains delimited by comma,
+                                defaulted to 'cisco.com'
+        :param detection_mode: defaulted to 'Inline',
+                                can be: 'Passive','Inline','Access Control','Network Discovery'
+        :param http_dir_root: absolute path of the http root
+                                e.g. '/tftpboot/asa/'
+        :param http_dir_tmp: the temp dir under http_dir_root for version_build
+                            and the config file, e.g. '/cache/temp_config'
+        :param scp_dir_root: absolute path of the dir for version_build
+                            e.g. '/tftpboot/asa/cache/Release' or '/tftpboot/asa/cache/Development'
+        :param bz_image: bz image has to be installed on DUT, which is copied
+                        from the scp_server, defaulted to 'bzImage*'
+        :param usb_image: usb image has to be installed on DUT, which is copied
+                            from the scp_server, defaulted to 'usb-ramdisk*'
+        :param arch: arch type, defaulted to 'x86_64'
+        :param console: set to True if the device is accessed through its console;
+                        defaulted to False
+        :return: None
+        """
+        kwargs['fmc'] = fmc
+        kwargs['uut_ip'] = uut_ip
+        kwargs['uut_password'] = uut_password
+        kwargs['uut_netmask'] = uut_netmask
+        kwargs['uut_gateway'] = uut_gateway
+        kwargs['timeout'] = timeout
+        kwargs['dns_server'] = dns_server
+        arch = kwargs.get('arch', 'x86_64')
+        logger.info('=== Feaching bz and usb file from pse or engfs ...')
+        server_ip, tftp_prefix, scp_prefix, files = prepare_installation_files(site, 's3fmc', branch, version,
+                                                                               iso=iso_file_type, arch_type=arch)
+        if not files[0]:
+            raise Exception('Series3 FMC iso file not found on server')
+
+        logger.debug('=== server {}, tftp prefix {}, scp prefix {}'.format(server_ip, tftp_prefix, scp_prefix))
+        kwargs['http_server'] = private_image_server
+        kwargs['scp_server'] = server_ip
+        kwargs['scp_port'] = '22'
+        kwargs['scp_username'] = pxe_username
+        kwargs['scp_password'] = pxe_password
+        kwargs['scp_hostname'] = pxe_hostname
+        kwargs['scp_dir_root'] = kwargs.get('scp_dir_root',
+                                                '{}/{}'.format(pxe_dir['scp_dir_root'], branch))
+        kwargs['http_dir_root'] = kwargs.get('http_dir_root', pxe_dir['http_dir_root'])
+        kwargs['http_dir_tmp'] = kwargs.get('http_dir_tmp', pxe_dir['http_dir_tmp'])
+        logger.info('=== Private ISO provided by user ...')
+        kwargs['iso_image_path'] = iso_file_name
+        kwargs['version_build'] = version
+        kwargs['uut_ip'] = uut_ip
+        kwargs['dns_server'] = dns_server
+        logger.info('=== Files collected, Start Baseline vFMC with private iso ...')
+        self.series3fmc_baseline_private_image(**kwargs)
+
+    def series3fmc_baseline_private_image(self, fmc, http_server, scp_server, scp_port,
+                            scp_username, scp_password, scp_hostname,
+                            version_build, iso_image_path,
+                            uut_ip, uut_password,uut_netmask, uut_gateway, dns_server,
+                            hostname='firepower',
+                            search_domains='cisco.com',
+                            http_dir_root='/var/www',
+                            http_dir_tmp='iso/tmp_dev',
+                            scp_dir_root='/nfs/netboot/ims/Release',
+                            bz_image='bzImage*',
+                            usb_image='usb-ramdisk*',
+                            arch='x86_64',
+                            console=False,
+                            timeout=None, http_port='80'):
+        """Install FMC iso image on Series 3 device via http.
+
+        :param fmc: object of Series3fmc for reconnecting the device
+        :param http_server: HTTP Server IP Address is private ISO server address, e.g. '10.83.68.41'
+                            must not use the same http server as the scp server
+        :param http_port: HTTP server port, e.g. '80'
+        :param scp_server: SCP Server IP Address, e.g. '10.89.23.80'. This is PXE Server address
+        :param scp_port: SCP Server Port, e.g. '22'
+        :param scp_username: SCP Username
+        :param scp_password: SCP Password
+        :param scp_hostname: SCP Hostname
+        :param version_build: e.g. '6.2.1-1366'
+        :param iso_image_path: FMC image path on HTTP server/private HTTP server
+                                e.g. '/scratch/moasano/Cisco_Firepower_Mgmt_Center_Virtual-6.5.0-1128.iso'
+        :param uut_ip: Device IP Address
+        :param uut_netmask: Device Netmask
+        :param uut_gateway: Device Gateway
+        :param dns_server: DNS server
+        :param hostname: hostname to be set, e.g. 'BATIT-3D8130-1-AST'
+        :param search_domains: search domains delimited by comma,
+                                defaulted to 'cisco.com'
+        :param http_dir_root: absolute path of the http root
+                                e.g. '/var/www'
+        :param http_dir_tmp: the temp dir under http_dir_root for version_build
+                            and the config file, e.g. 'iso/tmp_dev'
+        :param scp_dir_root: absolute path of the dir for version_build
+                            e.g. '/nfs/netboot/ims/Release' or '/nfs/netboot/ims/Development'
+        :param bz_image: bz image has to be installed on DUT, which is copied
+                        from the scp_server, defaulted to 'bzImage*'
+        :param usb_image: usb image has to be installed on DUT, which is copied
+                            from the scp_server, defaulted to 'usb-ramdisk*'
+        :param arch: arch type, defaulted to 'x86_64'
+        :param console: set to True if the device is accessed through its console;
+                        defaulted to False
+        :param timeout: in seconds; time to wait for device to boot with the new image;
+                        if not provided, default baseline time is 7200s
+        :return: None
+
+        """
+        publish_kick_metric('device.series3fmc.baseline', 1)
+        # set baseline timeout
+        self.set_installation_timeouts(timeout)
+        # Define attributes and variables
+        self.fmc = fmc
+        self.http_server = http_server
+        self.http_port = http_port
+        self.scp_server = scp_server
+        self.scp_port = scp_port
+        self.scp_username = scp_username
+        self.scp_password = scp_password
+        self.scp_hostname = scp_hostname
+        self.version_build = version_build
+        self.iso_image_path = iso_image_path
+        self.iso_file = iso_image_path.split('/')[-1]
+        self.uut_ip = uut_ip
+        self.uut_password = uut_password
+        self.uut_netmask = uut_netmask
+        self.uut_gateway = uut_gateway
+        self.dns_server = dns_server
+        self.hostname = hostname
+        self.search_domains = search_domains
+        self.http_dir_root = http_dir_root
+        self.http_dir_tmp = http_dir_tmp
+        self.http_dir_for_build = '{}/{}/{}'.format(self.http_dir_root,
+                                                    self.http_dir_tmp, self.version_build)
+        self.config_file = '{}.config'.format(self.iso_file.strip('.iso'))
+        self.config_path = '{}/{}'.format(self.http_dir_for_build, self.config_file)
+        self.config_file_url = '{}/{}/{}'.format(self.http_dir_tmp, self.version_build, self.config_file)
+        self.scp_dir_root = scp_dir_root
+        self.bz_image = bz_image
+        self.usb_image = usb_image
+        self.arch = arch
+        self.bz_image_path = '{}/{}/os/{}/boot/{}'.format(self.scp_dir_root,
+                                                          self.version_build,
+                                                          self.arch, self.bz_image)
+
+        self.usb_image_path = '{}/{}/os/{}/ramdisks/{}'.format(self.scp_dir_root,
+                                                               self.version_build,
+                                                               self.arch, self.usb_image)
+
+        self.console = console
+
+        logger.info('=== Generate config file on the http server ...')
+        self.generate_config_file(private_iso=True)
+        logger.info('=== Copy bz and usb files to dut ...')
+        logger.info('=== Generate lilo file on dut ...')
+        self.go_to('sudo_state')
+        self.copy_bz_usb_files_setup_lilo_to_install(private_iso=True)
+
+        if not self.console:
+            logger.info('=== Confirm device is rebooted ...')
+            self.confirm_device_rebooted()
+            logger.info('=== Wait for device to be up and configure device ...')
+            self.poll_device_and_configure(initial_password=self.uut_password)
+            if self.uut_password is not self.sm.patterns.default_password:
+                conn = self.fmc.ssh_vty(ip=Series3Constants.uut_ssh_ip,
+                                        port=Series3Constants.uut_ssh_port,
+                                        password=self.uut_password,
+                                        timeout=self.ssh_timeout)
+            else:
+                conn = self.fmc.ssh_vty(ip=Series3Constants.uut_ssh_ip,
+                                        port=Series3Constants.uut_ssh_port,
+                                        password=self.sm.patterns.default_password,
+                                        timeout=self.ssh_timeout)
+            self.spawn_id = conn.spawn_id
+        else:
+            logger.info('=== Console connection available, wait for login prompt ...')
+            d = Dialog([
+                ['login:', 'sendline({})'.format(self.sm.patterns.login_username),
+                 None, True, False],
+                ['Password:', 'sendline({})'.format(self.sm.patterns.default_password),
+                 None, False, False],
+            ])
+            d.process(self.spawn_id, timeout=self.installation_timeout)
+        logger.info('=== Fully installed.')
+        logger.info('=== Validate version installed ...')
+        self.validate_version(self.iso_file,private_iso=True)
+
 

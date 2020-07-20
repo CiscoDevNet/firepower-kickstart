@@ -128,8 +128,8 @@ class AsaConfig():
                         cmd = '{} {}'.format(context, ctx)
                         cmd += '\ncontext {}'.format(ctx)
                         cmd += '\nconfig-url disk0:/{}.ctx'.format(ctx)
-                        self.asa_conn.config(cmd)
-
+                        self.asa_conn.config(cmd, timeout = 30)
+                        
                         # allocate interfaces
                         if 'interfaces' in self.topo:
                             intfs = self.topo.interfaces.get(ctx)
@@ -1770,5 +1770,6 @@ class AsaConfig():
                 self.logger.error("Failed to enable smart license feature %s" % f)
                 return False
 
+        time.sleep(20)
         self.logger.info("Succeeded enabling smart license features: %s" % features)
         return True

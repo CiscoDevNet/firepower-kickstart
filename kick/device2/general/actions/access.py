@@ -166,6 +166,7 @@ def tty_id_from_roty_id(spawn, port):
         :param port: the roty port
         :return: the tty identifier for the line
     """
+    spawn.sendline('terminal length 30\n')
     spawn.sendline('show line\n')
     time.sleep(3)
     output_lines = []

@@ -10,6 +10,7 @@ from ...series3.actions import Series3
 from ...ep.actions import Ep
 from ...chassis.actions import Chassis
 from ...wm.actions import Wm
+from ...asa.actions import Asa
 
 MODEL_TO_HW_MAP = {
     '63': Series3,
@@ -21,7 +22,8 @@ MODEL_TO_HW_MAP = {
     '77': Kp,
     'ep': Ep,
     'chassis': Chassis,
-    '78': Wm
+    '78': Wm,
+    'asa': Asa
 }
 
 

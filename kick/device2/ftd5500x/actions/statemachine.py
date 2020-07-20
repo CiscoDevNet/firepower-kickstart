@@ -45,6 +45,7 @@ class Ftd5500xStatemachine(StateMachine):
         prelogin_to_fireos_path = Path(prelogin_state, fireos_state, 'admin',
                                        Dialog([self.statements.login_password_statement]))
         fireos_to_prelogin_path = Path(fireos_state, prelogin_state, 'exit', None)
+
         fireos_to_expert_path = Path(fireos_state, expert_state, 'expert', None)
         expert_to_fireos_path = Path(expert_state, fireos_state, 'exit', None)
         expert_to_sudo_path = Path(expert_state, sudo_state, 'sudo su -',
@@ -56,17 +57,9 @@ class Ftd5500xStatemachine(StateMachine):
         fireos_to_ciscoasa_state = Path(fireos_state, ciscoasa_state, 'expert', None)
 
         # lina cli paths
-        expert_to_disable_path = Path(expert_state, disable_state, 'sudo lina_cli',
-                                      self.dialogs.d_expert_to_disable)
         fireos_to_disable_state = Path(fireos_state, disable_state,
                                        'system support diagnostic-cli',
-                                       self.dialogs.d_enable_to_disable)
-        fireos_to_enable_state = Path(fireos_state, enable_state,
-                                      'system support diagnostic-cli',
-                                      self.dialogs.d_disable_to_enable)
-        fireos_to_config_state = Path(fireos_state, config_state,
-                                      'system support diagnostic-cli',
-                                      self.dialogs.d_endisable_to_conft)
+                                       None)
         disable_to_enable_state = Path(disable_state, enable_state, 'en',
                                        self.dialogs.disable_to_enable)
         enable_to_disable_state = Path(enable_state, disable_state, "disable", None)
@@ -88,7 +81,6 @@ class Ftd5500xStatemachine(StateMachine):
         self.add_path(expert_to_fireos_path)
         self.add_path(expert_to_sudo_path)
         self.add_path(sudo_to_expert_path)
-        self.add_path(expert_to_disable_path)
         self.add_path(disable_to_fireos_path)
         self.add_path(ciscoasa_state_to_sudo_state)
         self.add_path(fireos_to_ciscoasa_state)
@@ -98,8 +90,6 @@ class Ftd5500xStatemachine(StateMachine):
         self.add_path(config_to_enable_path)
         self.add_path(system_to_expert_path)
         self.add_path(expert_to_system_path)
-        self.add_path(fireos_to_config_state)
-        self.add_path(fireos_to_enable_state)
         self.add_path(enable_to_disable_state)
 
         # Add a default statement:

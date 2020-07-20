@@ -13,6 +13,14 @@ def action_mio_to_fpr_module(spawn):
     spawn.sendline()
 
 
+def clear_error(spawn):
+    time.sleep(0.1)
+    spawn.sendline('\x15')
+    time.sleep(0.5)
+    spawn.sendline()
+    spawn.sendline()
+
+
 class ChassisDialogs:
     def __init__(self, patterns, chassis_data):
         self.patterns = patterns
@@ -30,15 +38,13 @@ class ChassisDialogs:
 
         # from MIO to module boot cli
         self.d_mio_to_fpr_module = Dialog([
-            ['Close Network Connection to Exit', action_mio_to_fpr_module, None,
-             True, True],
-            [self.patterns.prompt.fireos_prompt, "sendline(exit)", None, True,
-             True],
-            [self.patterns.prompt.expert_cli, "sendline(exit)", None, True,
-             True],
-            [self.patterns.prompt.sudo_prompt, "sendline(exit)", None, True,
-             True],
-            [r'\x07', "sendline({})".format(chr(3)), None, True, True], ])
+            [r'\x07$', clear_error, None, True, True],
+            ['Close Network Connection to Exit', action_mio_to_fpr_module, None, True, True],
+            [self.patterns.prompt.fireos_prompt, "sendline(exit)", None, True, True],
+            [self.patterns.prompt.expert_cli, "sendline(exit)", None, True, True],
+            [self.patterns.prompt.sudo_prompt, "sendline(exit)", None, True, True],
+            [self.patterns.prompt.disable_prompt, "sendline(exit)", None, True, True],
+            [self.patterns.prompt.enable_prompt, "sendline(exit)", None, True, True]])
 
         self.d_fireos_to_fpr = Dialog([
             ['Disconnected.*>d', "sendline(\x08)", None, True, True]
