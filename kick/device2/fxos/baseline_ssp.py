@@ -12,13 +12,7 @@ from kick.device2.fxos.app import AppInstance
 from kick.device2.fxos.util_app import AppArgumentsParser
 from kick.device2.ssp.actions import Ssp
 
-KICK_EXTERNAL = False
-
-try:
-    from kick.file_servers.file_servers import *
-except ImportError:
-    KICK_EXTERNAL = True
-    pass
+from kick.file_servers.file_servers import *
 
 from kick.device2.fxos.configuration_utils import ConfigurationClean, PackagePrerequisites, \
     ConfigureInterfacesUtils, ConfigureMultiInstanceUtils, InterfaceCleanUtils

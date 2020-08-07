@@ -69,6 +69,8 @@ class NewSpawn(pty_backend.Spawn):
 ###################################################################################################
 
 DEFAULT_TIMEOUT = 10
+# timeout for configuration wizard to complete
+DEFAULT_CONFIGURATION_TIMEOUT = 900
 
 
 class BasicDevice:
@@ -83,6 +85,7 @@ class BasicDevice:
         # such as ssh_console(), ssh_vty(), etc.
 
         self.set_default_timeout(DEFAULT_TIMEOUT)
+        self.set_default_config_timeout(DEFAULT_CONFIGURATION_TIMEOUT)
 
     def set_default_timeout(self, timeout):
         """Set the default timeout value for this device.
@@ -97,6 +100,20 @@ class BasicDevice:
 
         logger.debug('setting device default timeout to {}'.format(timeout))
         self.default_timeout = timeout
+
+    def set_default_config_timeout(self, timeout):
+        """Set the default configuration timeout value for this device.
+
+        In the later function call of ssh_vty(), unless overwritten,
+        this timeout value will be used for processing the configuration wizard dialog.
+
+        :param timeout: in seconds
+        :return: None
+
+        """
+
+        logger.debug('setting device default configuration timeout to {}'.format(timeout))
+        self.configuration_timeout = timeout
 
     def ssh_console(self, ip, port, username=DEFAULT_USERNAME, password=DEFAULT_PASSWORD,
                     timeout=None, en_password=DEFAULT_ENPASSWORD):
@@ -506,7 +523,11 @@ class BasicDevice:
             spawn_id.close()
             raise Exception('Error while taking ssh connection for {} as the user has taken maximum connections'.format(username))
 
-        config_dialog = CONFIGURATION_DIALOG.process(spawn_id, timeout=900)
+        try:
+            config_dialog = CONFIGURATION_DIALOG.process(spawn_id, timeout=self.configuration_timeout)
+        except uniconTimeoutError:
+            spawn_id.close()
+            raise
         # get hostname dynamically and reinitialize the state machines
         self.reinitialize_sm(spawn_id, config_dialog)
 
@@ -1239,5 +1260,6 @@ def _set_password(line, username, new_password):
         logger.info('Changing password successfully')
     except uniconTimeoutError:
         logger.error('Changing password for {} user has failed'.format(username))
+        line.spawn_id.close()
         raise Exception('Error while changing default password for {} user'.format(username))
 

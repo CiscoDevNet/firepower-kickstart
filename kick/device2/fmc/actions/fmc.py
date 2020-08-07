@@ -47,6 +47,8 @@ class Fmc(BasicDevice):
         additional (unused) arguments.
 
         """
+
+        super().__init__()
         graphite.publish_kick_metric('device.fmc.init', 1)
         self.patterns = FmcPatterns(
             hostname=hostname,
@@ -55,8 +57,6 @@ class Fmc(BasicDevice):
             sudo_password=sudo_password)
         self.sm = FmcStatemachine(self.patterns)
         self.line_class = FmcLine
-
-        self.set_default_timeout(DEFAULT_TIMEOUT)
 
     def log_checks(self, fmc_line, list_files=['/var/log/boot_*'],
                    search_strings=['fatal', 'error'], exclude_strings=[], timeout=300):

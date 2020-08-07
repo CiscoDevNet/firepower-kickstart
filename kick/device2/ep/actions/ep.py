@@ -15,8 +15,6 @@ from ...general.actions.basic import BasicDevice, BasicLine, NewSpawn
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 10
-
 
 class Ep(BasicDevice):
     def __init__(self, hostname='firepower',
@@ -37,6 +35,7 @@ class Ep(BasicDevice):
         additional (unused) arguments.
 
         """
+        super().__init__()
         graphite.publish_kick_metric('device.ep.init', 1)
         self.patterns = EpPatterns(
             hostname=hostname,
@@ -45,8 +44,6 @@ class Ep(BasicDevice):
             sudo_password=sudo_password)
         self.sm = EpStatemachine(self.patterns)
         self.line_class = EpLine
-
-        self.set_default_timeout(DEFAULT_TIMEOUT)
 
     def ssh_vty(self, ip, port, username='admin', password='Admin123',
                 timeout=None, line_type='ssh', rsa_key=None):

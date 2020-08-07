@@ -55,6 +55,7 @@ class M3(Fmc):
 
         """
 
+        super().__init__()
         publish_kick_metric('device.m3.init', 1)
 
         self.patterns = M3Patterns(
@@ -65,8 +66,6 @@ class M3(Fmc):
             cimc_hostname=cimc_hostname)
         self.sm = M3Statemachine(self.patterns)
         self.line_class = M3Line
-
-        self.set_default_timeout(DEFAULT_TIMEOUT)
 
     def ssh_cimc(self, ip, port,
                  cimc_username='admin',

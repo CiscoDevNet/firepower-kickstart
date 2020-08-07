@@ -5,13 +5,7 @@ from collections import defaultdict
 import time
 from ats import aetest
 
-KICK_EXTERNAL = False
-
-try:
-    from kick.file_servers.file_servers import *
-except ImportError:
-    KICK_EXTERNAL = True
-    pass
+from kick.file_servers.file_servers import *
 
 from kick.device2.fxos.app import AppInstance
 from kick.device2.fxos.app_handler import AppInstanceUtils

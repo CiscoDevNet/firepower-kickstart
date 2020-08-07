@@ -11,6 +11,7 @@ from ...ep.actions import Ep
 from ...chassis.actions import Chassis
 from ...wm.actions import Wm
 from ...asa.actions import Asa
+from ...wa.actions import Wa
 
 MODEL_TO_HW_MAP = {
     '63': Series3,
@@ -20,10 +21,11 @@ MODEL_TO_HW_MAP = {
     '75': Ftd5500x,
     '76': Ssp,
     '77': Kp,
-    'ep': Ep,
-    'chassis': Chassis,
     '78': Wm,
-    'asa': Asa
+    '79': Wa,
+    'ep': Ep,    
+    'chassis': Chassis,    
+    'asa': Asa    
 }
 
 

@@ -16,9 +16,9 @@ class KpPatterns:
         self.prompt.prelogin_prompt = r'[^\bLast \b](({}|firepower) )?login: '.format(self.hostname)
 
         # fxos related prompt
-        self.prompt.fxos_prompt = r'({}|firepower)([ /\w\-\*\(\)]+)?# '.format(self.hostname)
+        self.prompt.fxos_prompt = r'({}|firepower(-\d+)?)([ /\w\-\*\(\)]+)?# '.format(self.hostname)
         self.prompt.rommon_prompt = 'rommon.*>'
-        self.prompt.local_mgmt_prompt = r'({}|firepower)\(local-mgmt\)# '.format(self.hostname)
+        self.prompt.local_mgmt_prompt = r'({}|firepower(-\d+)?)\(local-mgmt\)# '.format(self.hostname)
 
         # ftd related prompt
         self.prompt.fireos_prompt = r'\r\n> $'
