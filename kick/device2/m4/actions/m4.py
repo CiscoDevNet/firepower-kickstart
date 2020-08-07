@@ -31,7 +31,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 10
 MAX_RETRY_COUNT = 3
 MAX_TIME_INSTALL = 7200
 SSH_DEFAULT_TIMEOUT = 90
@@ -55,6 +54,7 @@ class M4(Fmc):
 
         """
 
+        super().__init__()
         publish_kick_metric('device.m4.init', 1)
 
         self.patterns = M4Patterns(
@@ -65,8 +65,6 @@ class M4(Fmc):
             cimc_hostname=cimc_hostname)
         self.sm = M4Statemachine(self.patterns)
         self.line_class = M4Line
-
-        self.set_default_timeout(DEFAULT_TIMEOUT)
 
     def ssh_cimc(self, ip, port,
                  cimc_username='admin',
